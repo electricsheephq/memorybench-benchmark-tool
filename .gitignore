@@ -1,15 +1,25 @@
-.claude/
-/supermemory/
-/supermemory_assets/
-/node_modules
-/data/
-/rmscripts/
-
+# === Secrets & credentials ===
 .env
-.env.local
+.env.*
+*.env
+bench-env.sh
+secrets/
 
-# UI
-ui/node_modules/
-ui/.next/
-ui/tsconfig.tsbuildinfo
+# === Adapter symlinks (canonical source is in electric-sheep, private) ===
+src/providers/cortex/index.ts
+
+# === Benchmark outputs & databases ===
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+outputs/
+results/
+
+# === Node ===
+node_modules/
+dist/
+
+# === OS ===
 .DS_Store
+Thumbs.db
