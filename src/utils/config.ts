@@ -6,6 +6,11 @@ export interface Config {
   openaiApiKey: string
   anthropicApiKey: string
   googleApiKey: string
+  cortexApiKey: string
+  cortexBaseUrl: string
+  cortexOwnerId: string
+  cortexEntityType: string
+  cortexSourceAgent: string
 }
 
 export const config: Config = {
@@ -16,6 +21,11 @@ export const config: Config = {
   openaiApiKey: process.env.OPENAI_API_KEY || "",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   googleApiKey: process.env.GOOGLE_API_KEY || "",
+  cortexApiKey: process.env.CORTEX_API_KEY || "",
+  cortexBaseUrl: process.env.CORTEX_BASE_URL || "http://localhost:8000",
+  cortexOwnerId: process.env.CORTEX_OWNER_ID || "",
+  cortexEntityType: process.env.CORTEX_ENTITY_TYPE || "system",
+  cortexSourceAgent: process.env.CORTEX_SOURCE_AGENT || "memorybench",
 }
 
 export function getProviderConfig(provider: string): { apiKey: string; baseUrl?: string } {
@@ -30,6 +40,8 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
       return { apiKey: config.openaiApiKey } // Filesystem uses OpenAI for memory extraction
     case "rag":
       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
+    case "cortex":
+      return { apiKey: config.cortexApiKey, baseUrl: config.cortexBaseUrl }
     default:
       throw new Error(`Unknown provider: ${provider}`)
   }
