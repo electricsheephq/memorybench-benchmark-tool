@@ -31,6 +31,20 @@ export interface OrchestratorOptions {
   phases?: ("ingest" | "indexing" | "search" | "answer" | "evaluate" | "report")[]
 }
 
+function validateExplicitQuestionIds(
+  allQuestions: { questionId: string }[],
+  questionIds: string[]
+): string[] {
+  const knownIds = new Set(allQuestions.map((q) => q.questionId))
+  const unknownIds = questionIds.filter((id) => !knownIds.has(id))
+
+  if (unknownIds.length > 0) {
+    throw new Error(`Unknown question IDs: ${unknownIds.join(", ")}`)
+  }
+
+  return [...new Set(questionIds)]
+}
+
 function selectQuestionsBySampling(
   allQuestions: { questionId: string; questionType: string }[],
   sampling: SamplingConfig
@@ -213,8 +227,8 @@ export class Orchestrator {
       effectiveLimit = limit
 
       if (questionIds && questionIds.length > 0) {
-        logger.info(`Using explicit questionIds: ${questionIds.length} questions`)
-        targetQuestionIds = questionIds
+        targetQuestionIds = validateExplicitQuestionIds(allQuestions, questionIds)
+        logger.info(`Using explicit questionIds: ${targetQuestionIds.length} questions`)
       } else if (sampling) {
         logger.info(`Using sampling mode: ${sampling.mode}`)
         targetQuestionIds = selectQuestionsBySampling(allQuestions, sampling)

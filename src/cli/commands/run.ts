@@ -20,6 +20,7 @@ interface RunArgs {
   limit?: number
   sample?: number
   sampleType?: SampleType
+  questions?: string[]
   force?: boolean
   fromPhase?: PhaseId
   concurrency?: ConcurrencyConfig
@@ -60,6 +61,20 @@ export function parseRunArgs(args: string[]): RunArgs | null {
         logger.error(`Invalid sample type: ${type}. Valid types: consecutive, random`)
         return null
       }
+    } else if (arg === "--questions") {
+      const value = args[++i]
+      if (!value) {
+        logger.error("--questions requires a comma-separated list of question IDs")
+        return null
+      }
+      parsed.questions = value
+        .split(",")
+        .map((q) => q.trim())
+        .filter(Boolean)
+      if (parsed.questions.length === 0) {
+        logger.error("--questions requires at least one question ID")
+        return null
+      }
     } else if (arg === "-f" || arg === "--from-phase") {
       const phase = args[++i] as PhaseId
       if (PHASE_ORDER.includes(phase)) {
@@ -89,6 +104,11 @@ export function parseRunArgs(args: string[]): RunArgs | null {
     return null
   }
 
+  if (parsed.questions && parsed.questions.length > 0 && (parsed.sample || parsed.sampleType)) {
+    logger.error("--questions cannot be combined with --sample or --sample-type")
+    return null
+  }
+
   if (!parsed.runId) {
     parsed.runId = generateRunId()
   }
@@ -106,7 +126,7 @@ export async function runCommand(args: string[]): Promise<void> {
   if (!parsed) {
     console.log("Usage:")
     console.log(
-      "  New run:        bun run src/index.ts run -p <provider> -b <benchmark> [-r <runId>] [-j <judge>] [-m <model>] [-s <n>] [-l <limit>] [--force]"
+      "  New run:        bun run src/index.ts run -p <provider> -b <benchmark> [-r <runId>] [-j <judge>] [-m <model>] [-s <n> | --questions <ids>] [-l <limit>] [--force]"
     )
     console.log("  Continue run:   bun run src/index.ts run -r <runId> [-j <judge>] [-m <model>]")
     console.log("  From phase:     bun run src/index.ts run -r <runId> -f <phase>")
@@ -121,6 +141,7 @@ export async function runCommand(args: string[]): Promise<void> {
     console.log(`  -m, --answering-model  Answering model (default: ${DEFAULT_ANSWERING_MODEL})`)
     console.log("  -s, --sample           Sample N questions per category")
     console.log("  --sample-type          Sample type: consecutive (default), random")
+    console.log("  --questions            Comma-separated question IDs to run exactly")
     console.log("  -l, --limit            Limit total number of questions to process")
     console.log(`  -f, --from-phase       Start from phase: ${PHASE_ORDER.join(", ")}`)
     console.log("  --concurrency N        Default concurrency for all phases")
@@ -186,7 +207,9 @@ export async function runCommand(args: string[]): Promise<void> {
   const phases = parsed.fromPhase ? getPhasesFromPhase(parsed.fromPhase) : undefined
 
   let sampling: SamplingConfig | undefined
-  if (parsed.sample) {
+  if (parsed.questions && parsed.questions.length > 0) {
+    logger.info(`Using explicit questions: ${parsed.questions.join(", ")}`)
+  } else if (parsed.sample) {
     sampling = {
       mode: "sample",
       sampleType: parsed.sampleType || "consecutive",
@@ -208,6 +231,7 @@ export async function runCommand(args: string[]): Promise<void> {
     sampling,
     concurrency: parsed.concurrency,
     force: parsed.force,
+    questionIds: parsed.questions,
     phases,
   })
 }
