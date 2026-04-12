@@ -163,11 +163,12 @@ export async function runAnswerPhase(
         checkpointManager.updatePhase(checkpoint, question.questionId, "answer", {
           status: "failed",
           error,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - startTime,
         })
         logger.error(`Failed to answer ${question.questionId}: ${error}`)
-        throw new Error(
-          `Answer failed at ${question.questionId}: ${error}. Fix the issue and resume with the same run ID.`
-        )
+        logger.progress(index + 1, total, `Marked ${question.questionId} failed and continuing`)
+        return { questionId: question.questionId, failed: true, error }
       }
     }
   )
