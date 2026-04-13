@@ -237,9 +237,9 @@ export class CortexProvider implements Provider {
 
         const data = (await response.json()) as { items?: Array<{ item_id?: string; id?: string }> } | Array<{ item_id?: string; id?: string }>
         if (Array.isArray(data)) {
-          items = data.map(d => ({ id: d.item_id || d.id || "" })).filter(x => x.id)
+          items = data.filter((d: any) => d.item_id || d.id)
         } else if (data && typeof data === "object" && "items" in data && Array.isArray(data.items)) {
-          items = data.items.map(d => ({ id: d.item_id || d.id || "" })).filter(x => x.id)
+          items = data.items.filter((d: any) => d.item_id || d.id)
         } else {
           items = []
         }

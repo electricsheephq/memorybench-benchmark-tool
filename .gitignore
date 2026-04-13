@@ -6,7 +6,6 @@ bench-env.sh
 secrets/
 
 # === Adapter symlinks (canonical source is in electric-sheep, private) ===
-src/providers/cortex/index.ts
 
 # === Benchmark outputs & databases ===
 *.db
