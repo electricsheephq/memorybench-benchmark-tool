@@ -161,8 +161,9 @@ export class CortexProvider implements Provider {
     const body = {
       query,
       owner_id: this.ownerId,
-      entity_id: options.containerTag,
-      entity_type: this.entityType,
+      // entity_id removed from search — containerTag is a run identifier,
+      // not a semantic entity. Sending it filters to a nonexistent entity → 0 results.
+      // See: R-454 adapter forensics, golden-v3 0-context root cause.
       limit: options.limit ?? 25,
       include_archived: false,
     }
