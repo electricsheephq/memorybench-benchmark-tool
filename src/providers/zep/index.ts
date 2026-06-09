@@ -125,7 +125,9 @@ export class ZepProvider implements Provider {
     const episodes: Zep.EpisodeData[] = []
 
     for (const session of sessions) {
-      const isoDate = session.metadata?.date as string | undefined
+      const rawDate = session.metadata?.date as string | undefined
+      const isoDate =
+        rawDate && /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? `${rawDate}T00:00:00Z` : rawDate
 
       for (const message of session.messages) {
         const speaker = message.speaker || message.role
