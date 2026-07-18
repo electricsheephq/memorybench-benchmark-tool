@@ -7,6 +7,7 @@ import { logger } from "../../utils/logger"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
 import { calculateRetrievalMetrics } from "./retrieval-eval"
+import { cliLlmBackend } from "../../utils/cli-llm"
 
 export async function runEvaluatePhase(
   judge: Judge,
@@ -56,21 +57,28 @@ export async function runEvaluatePhase(
       try {
         const searchResults = checkpoint.questions[question.questionId].phases.search.results || []
 
-        const [result, retrievalMetrics] = await Promise.all([
-          judge.evaluate({
-            question: question.question,
-            questionType: question.questionType,
-            groundTruth: question.groundTruth,
-            hypothesis,
-            providerPrompts: provider?.prompts,
-          }),
-          calculateRetrievalMetrics(
-            judge.getModel(),
-            question.question,
-            question.groundTruth,
-            searchResults
-          ),
-        ])
+        // The LLM-graded retrieval-metrics pass needs an ai-sdk LanguageModel;
+        // the CLI backend has none, so it is skipped there (QA accuracy — the
+        // judge verdict — is the primary deliverable; retrieval metrics are
+        // secondary and left undefined).
+        const evalJudge = judge.evaluate({
+          question: question.question,
+          questionType: question.questionType,
+          groundTruth: question.groundTruth,
+          hypothesis,
+          providerPrompts: provider?.prompts,
+        })
+        const [result, retrievalMetrics] = cliLlmBackend()
+          ? [await evalJudge, undefined]
+          : await Promise.all([
+              evalJudge,
+              calculateRetrievalMetrics(
+                judge.getModel(),
+                question.question,
+                question.groundTruth,
+                searchResults
+              ),
+            ])
 
         const durationMs = Date.now() - startTime
         checkpointManager.updatePhase(checkpoint, question.questionId, "evaluate", {

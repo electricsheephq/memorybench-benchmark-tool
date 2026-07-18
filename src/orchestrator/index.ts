@@ -6,6 +6,8 @@ import type { ConcurrencyConfig } from "../types/concurrency"
 import { createProvider } from "../providers"
 import { createBenchmark } from "../benchmarks"
 import { createJudge } from "../judges"
+import { CliJudge } from "../judges/cli"
+import { cliLlmBackend } from "../utils/cli-llm"
 import { CheckpointManager } from "./checkpoint"
 import { getProviderConfig, getJudgeConfig } from "../utils/config"
 import { resolveModel } from "../utils/models"
@@ -300,10 +302,16 @@ export class Orchestrator {
     }
 
     if (phases.includes("evaluate")) {
-      const judge = createJudge(judgeName)
-      const judgeConfig = getJudgeConfig(judgeName)
-      judgeConfig.model = judgeModel
-      await judge.initialize(judgeConfig)
+      // CLI backend (Codex/Claude) routes the judge through a subscription-auth
+      // CLI instead of a metered API key.
+      const judge = cliLlmBackend() ? new CliJudge() : createJudge(judgeName)
+      if (cliLlmBackend()) {
+        await judge.initialize({ apiKey: "none", model: judgeModel })
+      } else {
+        const judgeConfig = getJudgeConfig(judgeName)
+        judgeConfig.model = judgeModel
+        await judge.initialize(judgeConfig)
+      }
       await runEvaluatePhase(
         judge,
         benchmark,

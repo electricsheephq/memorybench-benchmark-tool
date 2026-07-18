@@ -15,6 +15,7 @@ import { buildContextString } from "../../types/prompts"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
 import { countTokens } from "../../utils/tokens"
+import { cliLlmBackend, cliLlmModelId, cliComplete } from "../../utils/cli-llm"
 
 type LanguageModel =
   | ReturnType<typeof createOpenAI>
@@ -93,11 +94,16 @@ export async function runAnswerPhase(
     return
   }
 
-  const { client, modelConfig } = getAnsweringModel(checkpoint.answeringModel)
+  const useCli = cliLlmBackend() !== null
+  // Under the CLI backend there is no ai-sdk client; a gpt-4o ModelConfig is
+  // used purely as the tokenizer for the reported token metrics.
+  const { client, modelConfig } = useCli
+    ? { client: null, modelConfig: getModelConfig(DEFAULT_ANSWERING_MODEL) }
+    : getAnsweringModel(checkpoint.answeringModel)
   const concurrency = resolveConcurrency("answer", checkpoint.concurrency, provider?.concurrency)
 
   logger.info(
-    `Generating answers for ${pendingQuestions.length} questions using ${modelConfig.displayName} (concurrency: ${concurrency})...`
+    `Generating answers for ${pendingQuestions.length} questions using ${useCli ? cliLlmModelId() : modelConfig.displayName} (concurrency: ${concurrency})...`
   )
 
   await ConcurrentExecutor.execute(
@@ -129,17 +135,22 @@ export async function runAnswerPhase(
         // custom prompt functions that transform context (e.g. Zep's XML-like tags).
         const contextTokens = Math.max(0, promptTokens - basePromptTokens)
 
-        const params: Record<string, unknown> = {
-          model: client(modelConfig.id),
-          prompt,
-          maxTokens: modelConfig.defaultMaxTokens,
-        }
+        let text: string
+        if (useCli) {
+          text = await cliComplete(prompt)
+        } else {
+          const params: Record<string, unknown> = {
+            model: client!(modelConfig.id),
+            prompt,
+            maxTokens: modelConfig.defaultMaxTokens,
+          }
 
-        if (modelConfig.supportsTemperature) {
-          params.temperature = modelConfig.defaultTemperature
-        }
+          if (modelConfig.supportsTemperature) {
+            params.temperature = modelConfig.defaultTemperature
+          }
 
-        const { text } = await generateText(params as Parameters<typeof generateText>[0])
+          text = (await generateText(params as Parameters<typeof generateText>[0])).text
+        }
 
         const durationMs = Date.now() - startTime
         checkpointManager.updatePhase(checkpoint, question.questionId, "answer", {

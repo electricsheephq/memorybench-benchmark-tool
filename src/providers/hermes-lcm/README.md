@@ -80,3 +80,16 @@ bun run src/index.ts run -p hermes-lcm -b longmemeval -j gpt-4o -m gpt-4o -r her
 
 Swap `-j sonnet-4 -m sonnet-4` (Anthropic) or `-j gemini-2.5-flash -m
 gemini-2.5-flash` (Google) to change the judge/answerer.
+
+## ⚠ Result-comparability disclosures
+
+Bake these into any numbers reported from a hermes-lcm run:
+
+- **Judge/answerer = `gemini-2.5-flash`** in the runs produced so far (no funded
+  OpenAI/Anthropic key was available: the OpenAI key was `insufficient_quota` and
+  no `ANTHROPIC_API_KEY` existed). This is **non-standard** vs the usual `gpt-4o`
+  LongMemEval leaderboard judge, so the accuracy numbers are **directional until a
+  judge-parity rerun** with `-j gpt-4o -m gpt-4o`.
+- **Retrieval = production `tools.lcm_recall` single-shot snippets** (≤25 hits,
+  300 chars each). The adapter does not agentically re-expand hits, so this scores
+  hermes-lcm's one-shot recall payload — not a multi-hop recall→expand agent loop.
