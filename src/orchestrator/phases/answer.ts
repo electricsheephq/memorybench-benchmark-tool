@@ -137,7 +137,12 @@ export async function runAnswerPhase(
 
         let text: string
         if (useCli) {
-          text = await cliComplete(prompt)
+          // FIX B: the answerer runs at medium codex reasoning effort (the low
+          // default left "I don't know" on 27 questions with the facts visible);
+          // the judge keeps the low default (HERMES_MB_CODEX_EFFORT).
+          text = await cliComplete(prompt, {
+            effort: process.env.HERMES_MB_CODEX_ANSWER_EFFORT || "medium",
+          })
         } else {
           const params: Record<string, unknown> = {
             model: client!(modelConfig.id),

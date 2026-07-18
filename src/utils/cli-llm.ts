@@ -34,10 +34,17 @@ export function cliLlmModelId(): string {
   return "n/a"
 }
 
-export async function cliComplete(prompt: string): Promise<string> {
+export interface CliCompleteOptions {
+  /** codex `model_reasoning_effort` override for this call (e.g. answerer=medium
+   * while the judge stays at the low default). Ignored by the claude backend. */
+  effort?: string
+}
+
+export async function cliComplete(prompt: string, opts?: CliCompleteOptions): Promise<string> {
   const backend = cliLlmBackend()
   if (!backend) throw new Error("cliComplete called but HERMES_MB_LLM_CLI is not codex|claude")
-  const run = () => (backend === "codex" ? codexComplete(prompt) : claudeComplete(prompt))
+  const run = () =>
+    backend === "codex" ? codexComplete(prompt, opts?.effort) : claudeComplete(prompt)
   try {
     return await run()
   } catch (first) {
@@ -94,10 +101,10 @@ function runProcess(
   })
 }
 
-function codexComplete(prompt: string): Promise<string> {
+function codexComplete(prompt: string, effortOverride?: string): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "codex-llm-"))
   const outFile = join(dir, "out.txt")
-  const effort = process.env.HERMES_MB_CODEX_EFFORT || "low"
+  const effort = effortOverride || process.env.HERMES_MB_CODEX_EFFORT || "low"
   const args = [
     "exec",
     "--skip-git-repo-check",
