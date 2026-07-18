@@ -42,6 +42,10 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
     case "cortex":
       return { apiKey: config.cortexApiKey, baseUrl: config.cortexBaseUrl }
+    case "hermes-lcm":
+      // hermes-lcm needs no provider API key: retrieval is fully local
+      // (SQLite + local fastembed via the Python bridge).
+      return { apiKey: "none" }
     default:
       throw new Error(`Unknown provider: ${provider}`)
   }
