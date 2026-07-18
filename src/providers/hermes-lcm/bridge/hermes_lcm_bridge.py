@@ -17,8 +17,12 @@ repo, which this imports rather than reimplements):
   embeddings. Embeds are batched per call.
 * ``search`` invokes the PRODUCTION ``tools.lcm_recall`` over that store through a
   ``SimpleNamespace`` engine with a fresh, dataset-disjoint ``current_session_id``
-  (so the scope prior never silently lifts an evidence session), then maps each
-  hit -> ``{content, metadata}`` and returns the top-k the harness asks for.
+  (so the scope prior never silently lifts an evidence session), applies a
+  per-session diversity cap, then RE-FOLLOWS each hit's own ref back into the same
+  store (store_id -> MessageStore row, node_id -> DAG summary) to serve a fuller
+  ~1200-char window instead of lcm_recall's 300-char snippet, and returns the
+  top-k the harness asks for. This is ONE bounded enrichment over the refs the
+  single lcm_recall call already returned -- no extra searches, no evidence peek.
 
 Fairness: the bridge only ever sees what the harness hands it (the session
 messages + the query). No dataset-specific logic, no evidence peeking.
@@ -51,6 +55,26 @@ _DEFAULT_MODELS = {
     "fastembed": "BAAI/bge-small-en-v1.5",
     "voyage": "voyage-context-3",
 }
+
+# Ref-follow enrichment (FIX A): lcm_recall returns 300-char snippets that
+# truncate the fact; we follow each hit's own ref back into the SAME per-container
+# store to serve a fuller window. Bounded, no extra searches.
+_RICH_CHARS = 1200
+# Per-session diversity cap: no single session may claim more than this many of
+# the returned hits before the rest of the slots are filled by rank.
+_PER_SESSION_CAP = 5
+
+
+def _center_window(text: str, start: int, end: int, width: int) -> str:
+    """Return up to ``width`` chars of ``text`` centered on ``[start, end)``."""
+    if len(text) <= width:
+        return text
+    match_len = max(0, end - start)
+    pad = max(0, (width - match_len) // 2)
+    win_start = max(0, start - pad)
+    win_end = min(len(text), win_start + width)
+    win_start = max(0, win_end - width)
+    return text[win_start:win_end]
 
 # Preserve the real stdout for protocol responses, then redirect stdout to
 # stderr so any library chatter (model downloads, warnings) can never corrupt
@@ -277,6 +301,7 @@ class Bridge:
         store = MessageStore(str(db_path), ingest_protection_config=config)
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)  # noqa: F841 (keeps db warm)
+        dates = self._load_dates(container_tag)
         try:
             # A probe current-session id disjoint from any dataset session id
             # (the harness uses "<qid>-session-<i>"); the scope prior may boost
@@ -295,33 +320,69 @@ class Bridge:
             payload = json.loads(
                 lcm_tools.lcm_recall({"query": query, "limit": limit}, engine=engine)
             )
+            if "error" in payload:
+                raise RuntimeError(f"lcm_recall error: {payload['error']}")
+
+            # -- Per-session diversity: cap each session at _PER_SESSION_CAP hits
+            #    in rank order, then fill remaining slots (up to limit) by rank. --
+            hits = payload.get("hits", [])
+            primary: list[dict[str, Any]] = []
+            deferred: list[dict[str, Any]] = []
+            per_session: dict[Any, int] = {}
+            for hit in hits:
+                sid = hit.get("session_id")
+                if per_session.get(sid, 0) < _PER_SESSION_CAP:
+                    per_session[sid] = per_session.get(sid, 0) + 1
+                    primary.append(hit)
+                else:
+                    deferred.append(hit)
+            selected = (primary + deferred)[:limit]
+
+            # -- Ref-follow enrichment: serve a fuller window per hit from the
+            #    SAME store the hit references (no extra searches). --
+            results: list[dict[str, Any]] = []
+            for hit in selected:
+                session_id = hit.get("session_id")
+                kind = hit.get("kind")
+                content = hit.get("snippet") or ""
+                if kind == "summary":
+                    node_id = hit.get("node_id")
+                    if node_id is not None:
+                        node = dag.get_node(int(node_id))
+                        if node is not None and node.summary:
+                            content = node.summary[:_RICH_CHARS]
+                else:
+                    store_id = hit.get("store_id")
+                    if store_id is not None:
+                        row = store.get(int(store_id))
+                        full = (row or {}).get("content") or ""
+                        if full:
+                            span = hit.get("chunk_span") or {}
+                            cs = span.get("char_start")
+                            ce = span.get("char_end")
+                            if isinstance(cs, int) and isinstance(ce, int):
+                                content = _center_window(full, cs, ce, _RICH_CHARS)
+                            else:
+                                content = full[:_RICH_CHARS]
+                metadata = {
+                    "session_id": session_id,
+                    "date": dates.get(str(session_id)),
+                    "kind": kind,
+                    "score": hit.get("score"),
+                    "arms": hit.get("arms"),
+                    "from_current_session": hit.get("from_current_session"),
+                }
+                if kind == "summary":
+                    metadata["node_id"] = hit.get("node_id")
+                else:
+                    metadata["store_id"] = hit.get("store_id")
+                    if hit.get("chunk_span"):
+                        metadata["chunk_span"] = hit.get("chunk_span")
+                results.append({"content": content, "metadata": metadata})
         finally:
             vector_store.close()
             dag.close()
             store.close()
-
-        if "error" in payload:
-            raise RuntimeError(f"lcm_recall error: {payload['error']}")
-
-        dates = self._load_dates(container_tag)
-        results: list[dict[str, Any]] = []
-        for hit in payload.get("hits", []):
-            session_id = hit.get("session_id")
-            metadata = {
-                "session_id": session_id,
-                "date": dates.get(str(session_id)),
-                "kind": hit.get("kind"),
-                "score": hit.get("score"),
-                "arms": hit.get("arms"),
-                "from_current_session": hit.get("from_current_session"),
-            }
-            if hit.get("kind") == "summary":
-                metadata["node_id"] = hit.get("node_id")
-            else:
-                metadata["store_id"] = hit.get("store_id")
-                if hit.get("chunk_span"):
-                    metadata["chunk_span"] = hit.get("chunk_span")
-            results.append({"content": hit.get("snippet") or "", "metadata": metadata})
 
         return {
             "ok": True,
