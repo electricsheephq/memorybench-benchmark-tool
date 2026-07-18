@@ -37,7 +37,16 @@ export function cliLlmModelId(): string {
 export async function cliComplete(prompt: string): Promise<string> {
   const backend = cliLlmBackend()
   if (!backend) throw new Error("cliComplete called but HERMES_MB_LLM_CLI is not codex|claude")
-  return backend === "codex" ? codexComplete(prompt) : claudeComplete(prompt)
+  const run = () => (backend === "codex" ? codexComplete(prompt) : claudeComplete(prompt))
+  try {
+    return await run()
+  } catch (first) {
+    // One retry after a short pause: a transient CLI hiccup (observed: a
+    // simultaneous burst of missing codex output files) must not kill an
+    // entire 500-call phase. A second consecutive failure is real.
+    await new Promise((r) => setTimeout(r, 5000))
+    return run()
+  }
 }
 
 function runProcess(
