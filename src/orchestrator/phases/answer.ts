@@ -89,6 +89,18 @@ export async function runAnswerPhase(
     ? questions.filter((q) => questionIds.includes(q.questionId))
     : questions
 
+  const missingSearchResults = targetQuestions.filter((question) => {
+    const checkpointQuestion = checkpoint.questions[question.questionId]
+    if (!checkpointQuestion || checkpointQuestion.phases.answer.status === "completed") return false
+    const search = checkpointQuestion.phases.search
+    return search.status === "completed" && (!search.resultFile || !existsSync(search.resultFile))
+  })
+  if (missingSearchResults.length > 0) {
+    throw new Error(
+      `Cannot answer because a completed search result file is missing for: ${missingSearchResults.map((question) => question.questionId).join(", ")}`
+    )
+  }
+
   const pendingQuestions = targetQuestions.filter((q) => {
     const status = checkpointManager.getPhaseStatus(checkpoint, q.questionId, "answer")
     const searchStatus = checkpointManager.getPhaseStatus(checkpoint, q.questionId, "search")

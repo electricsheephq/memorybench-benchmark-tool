@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import type { Benchmark } from "../types/benchmark"
 import type { CliCallTelemetry } from "../utils/cli-llm"
 import { CheckpointManager } from "./checkpoint"
-import { buildAnswerPrompt } from "./phases/answer"
+import { buildAnswerPrompt, runAnswerPhase } from "./phases/answer"
 import { generateReport } from "./phases/report"
 import { questionCheckpointMetadata, syncQuestionCheckpointMetadata } from "./question-metadata"
 
@@ -73,6 +73,75 @@ describe("question-date checkpoint contract", () => {
     })
     expect(syncQuestionCheckpointMetadata(legacy, [question])).toBe(1)
     expect(legacy.questions[question.questionId]?.questionDate).toBe("2023/03/20")
+  })
+
+  test("copy and answer fail closed when completed search artifacts are missing", async () => {
+    const root = tempDir("memorybench-v1-copy-failure-")
+    const manager = new CheckpointManager(root)
+    const checkpoint = manager.create("source", "rag", "longmemeval", "gpt-4o", "gpt-4o")
+    const questions = [
+      {
+        questionId: "present-q",
+        question: "Present?",
+        groundTruth: "yes",
+        questionType: "single-session-user",
+        haystackSessionIds: [],
+      },
+      {
+        questionId: "missing-q",
+        question: "Missing?",
+        groundTruth: "yes",
+        questionType: "single-session-user",
+        haystackSessionIds: [],
+      },
+    ]
+    for (const question of questions) {
+      manager.initQuestion(checkpoint, question.questionId, "fixture-container", {
+        question: question.question,
+        groundTruth: question.groundTruth,
+        questionType: question.questionType,
+      })
+    }
+    const presentPath = join(manager.getResultsDir("source"), "present-q.json")
+    const missingPath = join(manager.getResultsDir("source"), "missing-q.json")
+    writeFileSync(presentPath, JSON.stringify({ results: [] }))
+    checkpoint.questions["present-q"]!.phases.search = {
+      status: "completed",
+      resultFile: presentPath,
+    }
+    checkpoint.questions["missing-q"]!.phases.search = {
+      status: "completed",
+      resultFile: missingPath,
+    }
+    manager.save(checkpoint)
+    await manager.flush("source")
+
+    let copyError: unknown
+    try {
+      manager.copyCheckpoint("source", "broken-copy", "answer")
+    } catch (error) {
+      copyError = error
+    }
+    expect(copyError).toBeInstanceOf(Error)
+    expect(String(copyError)).toContain("completed search result")
+    expect(existsSync(manager.getRunPath("broken-copy"))).toBe(false)
+
+    const benchmark = {
+      name: "longmemeval",
+      load: async () => {},
+      getQuestions: () => questions,
+      getHaystackSessions: () => [],
+      getGroundTruth: () => "yes",
+      getQuestionTypes: () => ({}),
+    } satisfies Benchmark
+    let answerError: unknown
+    try {
+      await runAnswerPhase(benchmark, checkpoint, manager)
+    } catch (error) {
+      answerError = error
+    }
+    expect(answerError).toBeInstanceOf(Error)
+    expect(String(answerError)).toContain("completed search result file is missing")
   })
 })
 
