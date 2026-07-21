@@ -1,11 +1,12 @@
 import type { ProviderName } from "../types/provider"
 import type { BenchmarkName } from "../types/benchmark"
 import type { JudgeName } from "../types/judge"
-import type { RunCheckpoint, SamplingConfig } from "../types/checkpoint"
+import type { LlmExecutionProvenance, RunCheckpoint, SamplingConfig } from "../types/checkpoint"
 import type { ConcurrencyConfig } from "../types/concurrency"
 import { createProvider } from "../providers"
 import { createBenchmark } from "../benchmarks"
 import { createJudge } from "../judges"
+import { CliJudge } from "../judges/cli"
 import { CheckpointManager } from "./checkpoint"
 import { getProviderConfig, getJudgeConfig } from "../utils/config"
 import { resolveModel } from "../utils/models"
@@ -16,6 +17,8 @@ import { runSearchPhase } from "./phases/search"
 import { runAnswerPhase } from "./phases/answer"
 import { runEvaluatePhase } from "./phases/evaluate"
 import { generateReport, saveReport, printReport } from "./phases/report"
+import { questionCheckpointMetadata, syncQuestionCheckpointMetadata } from "./question-metadata"
+import { cliLlmBackend, cliLlmProvenance } from "../utils/cli-llm"
 
 export interface OrchestratorOptions {
   provider: ProviderName
@@ -77,6 +80,21 @@ function selectQuestionsBySampling(
   }
 
   return allQuestions.map((q) => q.questionId)
+}
+
+function resolveExecutionProvenance(
+  configuredModel: string,
+  role: "answerer" | "judge"
+): LlmExecutionProvenance {
+  const cli = cliLlmProvenance(role)
+  if (cli) return { ...cli, configuredModel, tokenizerModel: "gpt-4o" }
+  const resolved = resolveModel(configuredModel)
+  return {
+    transport: "ai-sdk",
+    model: resolved.id,
+    modelExplicit: true,
+    configuredModel,
+  }
 }
 
 export class Orchestrator {
@@ -252,15 +270,28 @@ export class Orchestrator {
 
       for (const q of questionsToInit) {
         const containerTag = `${q.questionId}-${checkpoint.dataSourceRunId}`
-        this.checkpointManager.initQuestion(checkpoint, q.questionId, containerTag, {
-          question: q.question,
-          groundTruth: q.groundTruth,
-          questionType: q.questionType,
-        })
+        this.checkpointManager.initQuestion(
+          checkpoint,
+          q.questionId,
+          containerTag,
+          questionCheckpointMetadata(q)
+        )
       }
 
       this.checkpointManager.updateStatus(checkpoint, "running")
     }
+
+    const metadataUpdates = syncQuestionCheckpointMetadata(checkpoint, allQuestions)
+    if (metadataUpdates > 0) {
+      logger.info(`Backfilled questionDate for ${metadataUpdates} checkpoint questions`)
+    }
+    if (phases.includes("answer")) {
+      checkpoint.answererProvenance = resolveExecutionProvenance(answeringModel, "answerer")
+    }
+    if (phases.includes("evaluate")) {
+      checkpoint.judgeProvenance = resolveExecutionProvenance(judgeModel, "judge")
+    }
+    this.checkpointManager.save(checkpoint)
 
     const provider = createProvider(providerName)
     await provider.initialize(getProviderConfig(providerName))
@@ -300,8 +331,10 @@ export class Orchestrator {
     }
 
     if (phases.includes("evaluate")) {
-      const judge = createJudge(judgeName)
-      const judgeConfig = getJudgeConfig(judgeName)
+      const judge = cliLlmBackend() ? new CliJudge() : createJudge(judgeName)
+      const judgeConfig = cliLlmBackend()
+        ? { apiKey: "", model: judgeModel }
+        : getJudgeConfig(judgeName)
       judgeConfig.model = judgeModel
       await judge.initialize(judgeConfig)
       await runEvaluatePhase(

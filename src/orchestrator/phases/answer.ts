@@ -15,6 +15,16 @@ import { buildContextString } from "../../types/prompts"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
 import { countTokens } from "../../utils/tokens"
+import {
+  cliCallTelemetryFromError,
+  cliCallsFromPhase,
+  cliComplete,
+  cliLlmBackend,
+  cliLlmModelId,
+  reconcileCliProvenanceIdentity,
+  summarizeCliLedger,
+  type CliCallTelemetry,
+} from "../../utils/cli-llm"
 
 type LanguageModel =
   | ReturnType<typeof createOpenAI>
@@ -46,7 +56,7 @@ function getAnsweringModel(modelAlias: string): {
   }
 }
 
-function buildAnswerPrompt(
+export function buildAnswerPrompt(
   question: string,
   context: unknown[],
   questionDate?: string,
@@ -89,15 +99,19 @@ export async function runAnswerPhase(
   })
 
   if (pendingQuestions.length === 0) {
+    updateAnswerCliLedger(checkpoint, checkpointManager)
     logger.info("No questions pending answering")
     return
   }
 
-  const { client, modelConfig } = getAnsweringModel(checkpoint.answeringModel)
+  const useCli = cliLlmBackend() !== null
+  const { client, modelConfig } = useCli
+    ? { client: null, modelConfig: getModelConfig(DEFAULT_ANSWERING_MODEL) }
+    : getAnsweringModel(checkpoint.answeringModel)
   const concurrency = resolveConcurrency("answer", checkpoint.concurrency, provider?.concurrency)
 
   logger.info(
-    `Generating answers for ${pendingQuestions.length} questions using ${modelConfig.displayName} (concurrency: ${concurrency})...`
+    `Generating answers for ${pendingQuestions.length} questions using ${useCli ? cliLlmModelId("answerer") : modelConfig.displayName} (concurrency: ${concurrency})...`
   )
 
   await ConcurrentExecutor.execute(
@@ -107,6 +121,10 @@ export async function runAnswerPhase(
     "answer",
     async ({ item: question, index, total }) => {
       const resultFile = checkpoint.questions[question.questionId].phases.search.resultFile!
+      const priorLlmCalls = cliCallsFromPhase(
+        checkpoint.questions[question.questionId].phases.answer
+      )
+      let llmCall: CliCallTelemetry | undefined
 
       const startTime = Date.now()
       checkpointManager.updatePhase(checkpoint, question.questionId, "answer", {
@@ -129,17 +147,25 @@ export async function runAnswerPhase(
         // custom prompt functions that transform context (e.g. Zep's XML-like tags).
         const contextTokens = Math.max(0, promptTokens - basePromptTokens)
 
-        const params: Record<string, unknown> = {
-          model: client(modelConfig.id),
-          prompt,
-          maxTokens: modelConfig.defaultMaxTokens,
+        let text: string
+        if (useCli) {
+          text = await cliComplete(prompt, {
+            role: "answerer",
+            onTelemetry: (telemetry) => {
+              llmCall = telemetry
+            },
+          })
+        } else {
+          const params: Record<string, unknown> = {
+            model: client!(modelConfig.id),
+            prompt,
+            maxTokens: modelConfig.defaultMaxTokens,
+          }
+          if (modelConfig.supportsTemperature) {
+            params.temperature = modelConfig.defaultTemperature
+          }
+          text = (await generateText(params as Parameters<typeof generateText>[0])).text
         }
-
-        if (modelConfig.supportsTemperature) {
-          params.temperature = modelConfig.defaultTemperature
-        }
-
-        const { text } = await generateText(params as Parameters<typeof generateText>[0])
 
         const durationMs = Date.now() - startTime
         checkpointManager.updatePhase(checkpoint, question.questionId, "answer", {
@@ -148,6 +174,8 @@ export async function runAnswerPhase(
           promptTokens,
           basePromptTokens,
           contextTokens,
+          llmCall,
+          llmCalls: llmCall ? [...priorLlmCalls, llmCall] : priorLlmCalls,
           completedAt: new Date().toISOString(),
           durationMs,
         })
@@ -159,10 +187,13 @@ export async function runAnswerPhase(
         )
         return { questionId: question.questionId, durationMs }
       } catch (e) {
+        llmCall ||= cliCallTelemetryFromError(e)
         const error = e instanceof Error ? e.message : String(e)
         checkpointManager.updatePhase(checkpoint, question.questionId, "answer", {
           status: "failed",
           error,
+          llmCall,
+          llmCalls: llmCall ? [...priorLlmCalls, llmCall] : priorLlmCalls,
           completedAt: new Date().toISOString(),
           durationMs: Date.now() - startTime,
         })
@@ -173,5 +204,26 @@ export async function runAnswerPhase(
     }
   )
 
+  updateAnswerCliLedger(checkpoint, checkpointManager)
+
   logger.success("Answer phase complete")
+}
+
+function updateAnswerCliLedger(
+  checkpoint: RunCheckpoint,
+  checkpointManager: CheckpointManager
+): void {
+  if (!checkpoint.answererProvenance) return
+  const phases = Object.values(checkpoint.questions).map((question) => question.phases.answer)
+  const ledger = summarizeCliLedger(phases)
+  if (ledger.callCount === 0) return
+  Object.assign(checkpoint.answererProvenance, {
+    callCount: ledger.callCount,
+    retryCount: ledger.retryCount,
+    executionIdentityCount: ledger.executionIdentityCount,
+    mixedExecutionIdentity: ledger.mixedExecutionIdentity,
+    callLedgerComplete: ledger.callLedgerComplete,
+  })
+  reconcileCliProvenanceIdentity(checkpoint.answererProvenance, ledger.calls)
+  checkpointManager.save(checkpoint)
 }

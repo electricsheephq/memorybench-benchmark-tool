@@ -12,6 +12,7 @@ import type {
   TokenMetrics,
 } from "../../types/unified"
 import { logger } from "../../utils/logger"
+import { reconcileCliProvenanceIdentity, summarizeCliLedger } from "../../utils/cli-llm"
 
 const REPORTS_DIR = "./data/runs"
 
@@ -246,6 +247,23 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
     memscore = `${qualityPct}% / ${avgLatency}ms / ${tokenMetrics.avgContextTokens}tok`
   }
 
+  const answererLedger = summarizeCliLedger(
+    Object.values(checkpoint.questions).map((question) => question.phases.answer)
+  )
+  const judgeLedger = summarizeCliLedger(
+    Object.values(checkpoint.questions).map((question) => question.phases.evaluate)
+  )
+  const answererProvenance = checkpoint.answererProvenance
+    ? { ...checkpoint.answererProvenance }
+    : undefined
+  const judgeProvenance = checkpoint.judgeProvenance ? { ...checkpoint.judgeProvenance } : undefined
+  if (answererProvenance) reconcileCliProvenanceIdentity(answererProvenance, answererLedger.calls)
+  if (judgeProvenance) reconcileCliProvenanceIdentity(judgeProvenance, judgeLedger.calls)
+  const ledgerSummary = (ledger: typeof answererLedger) => {
+    const { calls: _calls, ...summary } = ledger
+    return summary
+  }
+
   const result: BenchmarkResult = {
     provider: checkpoint.provider,
     benchmark: checkpoint.benchmark,
@@ -253,6 +271,15 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
     dataSourceRunId: checkpoint.dataSourceRunId,
     judge: checkpoint.judge,
     answeringModel: checkpoint.answeringModel,
+    answererProvenance,
+    judgeProvenance,
+    cliLedger:
+      answererLedger.callCount || judgeLedger.callCount
+        ? {
+            answerer: answererLedger.callCount ? ledgerSummary(answererLedger) : undefined,
+            judge: judgeLedger.callCount ? ledgerSummary(judgeLedger) : undefined,
+          }
+        : undefined,
     timestamp: new Date().toISOString(),
     summary: {
       totalQuestions,
@@ -305,8 +332,20 @@ export function printReport(result: BenchmarkResult): void {
   console.log(`Benchmark: ${result.benchmark}`)
   console.log(`Run ID: ${result.runId}`)
   console.log(`Data Source: ${result.dataSourceRunId}`)
-  console.log(`Judge: ${result.judge}`)
-  console.log(`Answering Model: ${result.answeringModel}`)
+  console.log(`Configured Judge: ${result.judge}`)
+  console.log(`Configured Answering Model: ${result.answeringModel}`)
+  if (result.answererProvenance) {
+    const provenance = result.answererProvenance
+    console.log(
+      `Actual Answerer: ${provenance.model} via ${provenance.transport}${provenance.transportVersion ? ` [${provenance.transportVersion}]` : ""}${provenance.reasoningEffort ? ` (effort=${provenance.reasoningEffort})` : ""}`
+    )
+  }
+  if (result.judgeProvenance) {
+    const provenance = result.judgeProvenance
+    console.log(
+      `Actual Judge: ${provenance.model} via ${provenance.transport}${provenance.transportVersion ? ` [${provenance.transportVersion}]` : ""}${provenance.reasoningEffort ? ` (effort=${provenance.reasoningEffort})` : ""}`
+    )
+  }
   console.log("-".repeat(60))
   console.log("\nSUMMARY:")
   console.log(`  Total Questions: ${result.summary.totalQuestions}`)

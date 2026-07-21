@@ -58,6 +58,8 @@ export interface AnswerPhaseCheckpoint {
   promptTokens?: number
   basePromptTokens?: number
   contextTokens?: number
+  llmCall?: import("../utils/cli-llm").CliCallTelemetry
+  llmCalls?: import("../utils/cli-llm").CliCallTelemetry[]
   startedAt?: string
   completedAt?: string
   durationMs?: number
@@ -70,6 +72,8 @@ export interface EvaluatePhaseCheckpoint {
   score?: number
   explanation?: string
   retrievalMetrics?: RetrievalMetrics
+  llmCall?: import("../utils/cli-llm").CliCallTelemetry
+  llmCalls?: import("../utils/cli-llm").CliCallTelemetry[]
   startedAt?: string
   completedAt?: string
   durationMs?: number
@@ -111,6 +115,35 @@ export interface SamplingConfig {
   limit?: number
 }
 
+export interface LlmExecutionProvenance {
+  transport: "ai-sdk" | "codex-cli" | "claude-cli" | "mixed"
+  transportVersion?: string
+  model: string
+  modelExplicit: boolean
+  configuredModel: string
+  reasoningEffort?: string
+  provider?: string
+  serviceTier?: string
+  isolated?: boolean
+  modelPinSource?: "explicit-cli-argv" | "un-pinned" | "mixed"
+  eventUsageCapture?: "codex-jsonl" | "unavailable"
+  eventModelField?: "not-emitted-by-codex-jsonl" | "unavailable"
+  tokenizerModel?: string
+  callCount?: number
+  retryCount?: number
+  executionIdentityCount?: number
+  mixedExecutionIdentity?: boolean
+  callLedgerComplete?: boolean
+}
+
+export interface CliLedgerSummary {
+  callCount: number
+  retryCount: number
+  executionIdentityCount: number
+  mixedExecutionIdentity: boolean
+  callLedgerComplete: boolean
+}
+
 export interface RunCheckpoint {
   runId: string
   dataSourceRunId: string
@@ -119,6 +152,8 @@ export interface RunCheckpoint {
   benchmark: string
   judge: string
   answeringModel: string
+  answererProvenance?: LlmExecutionProvenance
+  judgeProvenance?: LlmExecutionProvenance
   createdAt: string
   updatedAt: string
   limit?: number

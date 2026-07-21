@@ -9,7 +9,7 @@ import {
   renameSync,
   unlinkSync,
 } from "fs"
-import { join } from "path"
+import { basename, join } from "path"
 import type {
   RunCheckpoint,
   QuestionCheckpoint,
@@ -356,6 +356,8 @@ export class CheckpointManager {
       benchmark: source.benchmark,
       judge: overrides?.judge || source.judge,
       answeringModel: overrides?.answeringModel || source.answeringModel,
+      answererProvenance: overrides?.answeringModel ? undefined : source.answererProvenance,
+      judgeProvenance: overrides?.judge ? undefined : source.judgeProvenance,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       limit: source.limit,
@@ -373,6 +375,15 @@ export class CheckpointManager {
     }
     if (!existsSync(newResultsDir)) {
       mkdirSync(newResultsDir, { recursive: true })
+    }
+
+    if (fromIndex > PHASE_ORDER.indexOf("search")) {
+      for (const question of Object.values(newQuestions)) {
+        const resultFile = question.phases.search.resultFile
+        if (resultFile) {
+          question.phases.search.resultFile = join(newResultsDir, basename(resultFile))
+        }
+      }
     }
 
     // Copy results directory if we're keeping search results (fromPhase is after search)
