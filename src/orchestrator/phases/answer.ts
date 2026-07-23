@@ -163,6 +163,7 @@ export async function runAnswerPhase(
         if (useCli) {
           text = await cliComplete(prompt, {
             role: "answerer",
+            retry: false,
             onTelemetry: (telemetry) => {
               llmCall = telemetry
             },

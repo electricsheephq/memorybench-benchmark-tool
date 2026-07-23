@@ -47,4 +47,11 @@ export interface Provider {
   clear(containerTag: string): Promise<void>
 }
 
-export type ProviderName = "supermemory" | "mem0" | "zep" | "filesystem" | "rag" | "cortex"
+export type ProviderName =
+  | "supermemory"
+  | "mem0"
+  | "zep"
+  | "filesystem"
+  | "rag"
+  | "cortex"
+  | "hermes-lcm"

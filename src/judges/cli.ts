@@ -17,6 +17,7 @@ export class CliJudge implements Judge {
     try {
       const text = await cliComplete(buildJudgePrompt(input), {
         role: "judge",
+        retry: false,
         onTelemetry: (telemetry) => {
           execution = telemetry
         },

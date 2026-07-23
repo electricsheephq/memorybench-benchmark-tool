@@ -42,6 +42,8 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
     case "cortex":
       return { apiKey: config.cortexApiKey, baseUrl: config.cortexBaseUrl }
+    case "hermes-lcm":
+      return { apiKey: "" }
     default:
       throw new Error(`Unknown provider: ${provider}`)
   }
