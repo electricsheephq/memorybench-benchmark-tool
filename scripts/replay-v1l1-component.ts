@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { exactEvidenceReference } from "../src/prompts/evidence-cards"
 import {
+  inferOperation,
+  shouldAttemptDeterministicOperation,
   validateDeterministicOperation,
   type DeterministicOperationRequest,
   type TypedOperand,
@@ -253,14 +255,50 @@ const cases = [
   },
 ]
 
+// Engagement gate (V1L1-LOSS8 repair): in card mode, with NO env opt-in
+// exported (exactly the state of every clone-and-resume launch path), C2 must
+// ENGAGE -- i.e. the answer phase would record status != "not_attempted" --
+// on every replay question whose phrasing requires a supported operation.
+const caseQuestions: Record<string, string> = {
+  gpt4_468eb063: "How many days ago did I meet Emma?",
+  "9ee3ecd6": "How many more points do I need?",
+  gpt4_a56e767c: "How many film festivals did I attend?",
+  gpt4_7abb270c: "What is the chronological order of the six events?",
+  eaca4986: "Which song was second?",
+  d851d5ba: "What was the total raised by March 20?",
+  "09ba9854": "How much would I save by taking the train?",
+  d6062bb9: "What is the combined view count?",
+  "8e91e7d9": "How many siblings do I have?",
+  a11281a2: "What was the follower increase?",
+  gpt4_ab202e7f: "How many kitchen items did I replace or fix?",
+  "2b8f3739": "What is the total amount of money I earned from selling my products at the markets?",
+  "92a0aa75": "How long have I been working in my current role?",
+}
+const engagement = Object.entries(caseQuestions).map(([id, question]) => {
+  const operationRequired = inferOperation(question) !== undefined
+  const engaged = shouldAttemptDeterministicOperation(question, "evidence_cards_v1", undefined)
+  return {
+    id,
+    question,
+    operationRequired,
+    engaged,
+    passed: !operationRequired || engaged,
+  }
+})
+
 const output = {
   suite: "V1-L1 frozen deterministic-operation replay",
   frozenRoot,
   extractorCorrect: cases.filter((item) => item.correct).length,
   total: cases.length,
   threshold: 11,
-  passed: cases.filter((item) => item.correct).length >= 11,
+  engagementRequired: engagement.filter((item) => item.operationRequired).length,
+  engagementEngaged: engagement.filter((item) => item.operationRequired && item.engaged).length,
+  engagementPassed: engagement.every((item) => item.passed),
+  passed:
+    cases.filter((item) => item.correct).length >= 11 && engagement.every((item) => item.passed),
   cases,
+  engagement,
 }
 console.log(JSON.stringify(output, null, 2))
 if (!output.passed) process.exitCode = 1
