@@ -74,7 +74,7 @@ interface CardItem {
   content: string
   date: string
   exactRef: string
-  role: "user" | "assistant"
+  role: "user" | "assistant" | "unknown"
   sessionHandle: string
 }
 
@@ -87,13 +87,16 @@ function parseCardItem(value: unknown): CardItem {
   const date = typeof metadata.date === "string" ? metadata.date.trim() : ""
   if (!sessionId) throw new Error("evidence-card item has no source session")
   if (!date) throw new Error("evidence-card item has no source date")
-  if (metadata.role !== "user" && metadata.role !== "assistant")
-    throw new Error("evidence-card item has no supported source role")
+  // Fail-closed stays for items with no content (checked above) or no source
+  // session/date. A missing/unsupported role alone must not drop evidence --
+  // that would handicap this arm vs a control that renders everything -- so
+  // role-less items render with role "unknown" instead.
+  const role = metadata.role === "user" || metadata.role === "assistant" ? metadata.role : "unknown"
   return {
     content: value.content,
     date,
     exactRef: exactEvidenceReference(value.content, metadata),
-    role: metadata.role,
+    role,
     sessionHandle: `session-${sha256(sessionId).slice(0, 12)}`,
   }
 }
