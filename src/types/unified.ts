@@ -1,3 +1,5 @@
+import type { CliLedgerSummary, LlmExecutionProvenance } from "./checkpoint"
+
 export interface QuestionTypeInfo {
   id: string
   alias: string
@@ -107,6 +109,12 @@ export interface BenchmarkResult {
   dataSourceRunId: string
   judge: string
   answeringModel: string
+  answererProvenance?: LlmExecutionProvenance
+  judgeProvenance?: LlmExecutionProvenance
+  cliLedger?: {
+    answerer?: CliLedgerSummary
+    judge?: CliLedgerSummary
+  }
   timestamp: string
   summary: {
     totalQuestions: number

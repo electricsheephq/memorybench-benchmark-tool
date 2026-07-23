@@ -20,6 +20,7 @@ export interface JudgeResult {
   score: number
   label: "correct" | "incorrect"
   explanation: string
+  execution?: import("../utils/cli-llm").CliCallTelemetry
 }
 
 export interface Judge {

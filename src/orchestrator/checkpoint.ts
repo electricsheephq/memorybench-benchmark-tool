@@ -5,11 +5,11 @@ import {
   mkdirSync,
   rmSync,
   readdirSync,
-  cpSync,
+  copyFileSync,
   renameSync,
   unlinkSync,
 } from "fs"
-import { join } from "path"
+import { basename, join } from "path"
 import type {
   RunCheckpoint,
   QuestionCheckpoint,
@@ -356,6 +356,8 @@ export class CheckpointManager {
       benchmark: source.benchmark,
       judge: overrides?.judge || source.judge,
       answeringModel: overrides?.answeringModel || source.answeringModel,
+      answererProvenance: overrides?.answeringModel ? undefined : source.answererProvenance,
+      judgeProvenance: overrides?.judge ? undefined : source.judgeProvenance,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       limit: source.limit,
@@ -365,26 +367,40 @@ export class CheckpointManager {
       questions: newQuestions,
     }
 
-    // Create directories
+    // Create a fresh destination. A copy must never merge with a prior run.
     const newRunPath = this.getRunPath(newRunId)
     const newResultsDir = this.getResultsDir(newRunId)
-    if (!existsSync(newRunPath)) {
-      mkdirSync(newRunPath, { recursive: true })
+    if (existsSync(newRunPath)) {
+      throw new Error(`Destination checkpoint already exists: ${newRunId}`)
     }
-    if (!existsSync(newResultsDir)) {
-      mkdirSync(newResultsDir, { recursive: true })
-    }
+    mkdirSync(newResultsDir, { recursive: true })
 
-    // Copy results directory if we're keeping search results (fromPhase is after search)
-    const sourceResultsDir = this.getResultsDir(sourceRunId)
-    if (existsSync(sourceResultsDir) && fromIndex > PHASE_ORDER.indexOf("search")) {
-      // Copy search results files
-      try {
-        cpSync(sourceResultsDir, newResultsDir, { recursive: true })
+    const preserveSearchResults = fromIndex > PHASE_ORDER.indexOf("search")
+    try {
+      if (preserveSearchResults) {
+        for (const question of Object.values(newQuestions)) {
+          const search = question.phases.search
+          if (search.status !== "completed") continue
+          const sourceFile = search.resultFile
+          if (!sourceFile || !existsSync(sourceFile)) {
+            throw new Error(
+              `completed search result is missing for ${question.questionId}: ${sourceFile || "no path"}`
+            )
+          }
+          const destinationFile = join(newResultsDir, basename(sourceFile))
+          copyFileSync(sourceFile, destinationFile)
+          if (!existsSync(destinationFile)) {
+            throw new Error(`completed search result was not copied for ${question.questionId}`)
+          }
+          search.resultFile = destinationFile
+        }
         logger.info(`Copied results from ${sourceRunId} to ${newRunId}`)
-      } catch (e) {
-        logger.warn(`Failed to copy results: ${e}`)
       }
+    } catch (error) {
+      rmSync(newRunPath, { recursive: true, force: true })
+      throw new Error(
+        `Failed to copy checkpoint ${sourceRunId} to ${newRunId}: ${error instanceof Error ? error.message : String(error)}`
+      )
     }
 
     this.save(newCheckpoint)

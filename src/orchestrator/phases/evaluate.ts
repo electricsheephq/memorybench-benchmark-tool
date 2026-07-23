@@ -7,6 +7,14 @@ import { logger } from "../../utils/logger"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
 import { calculateRetrievalMetrics } from "./retrieval-eval"
+import {
+  cliCallTelemetryFromError,
+  cliCallsFromPhase,
+  cliLlmBackend,
+  reconcileCliProvenanceIdentity,
+  summarizeCliLedger,
+  type CliCallTelemetry,
+} from "../../utils/cli-llm"
 
 export async function runEvaluatePhase(
   judge: Judge,
@@ -29,6 +37,7 @@ export async function runEvaluatePhase(
   })
 
   if (pendingQuestions.length === 0) {
+    updateJudgeCliLedger(checkpoint, checkpointManager)
     logger.info("No questions pending evaluation")
     return
   }
@@ -46,6 +55,10 @@ export async function runEvaluatePhase(
     "evaluate",
     async ({ item: question, index, total }) => {
       const hypothesis = checkpoint.questions[question.questionId].phases.answer.hypothesis!
+      const priorLlmCalls = cliCallsFromPhase(
+        checkpoint.questions[question.questionId].phases.evaluate
+      )
+      let llmCall: CliCallTelemetry | undefined
 
       const startTime = Date.now()
       checkpointManager.updatePhase(checkpoint, question.questionId, "evaluate", {
@@ -56,21 +69,25 @@ export async function runEvaluatePhase(
       try {
         const searchResults = checkpoint.questions[question.questionId].phases.search.results || []
 
-        const [result, retrievalMetrics] = await Promise.all([
-          judge.evaluate({
-            question: question.question,
-            questionType: question.questionType,
-            groundTruth: question.groundTruth,
-            hypothesis,
-            providerPrompts: provider?.prompts,
-          }),
-          calculateRetrievalMetrics(
-            judge.getModel(),
-            question.question,
-            question.groundTruth,
-            searchResults
-          ),
-        ])
+        const evaluation = judge.evaluate({
+          question: question.question,
+          questionType: question.questionType,
+          groundTruth: question.groundTruth,
+          hypothesis,
+          providerPrompts: provider?.prompts,
+        })
+        const [result, retrievalMetrics] = cliLlmBackend()
+          ? [await evaluation, undefined]
+          : await Promise.all([
+              evaluation,
+              calculateRetrievalMetrics(
+                judge.getModel(),
+                question.question,
+                question.groundTruth,
+                searchResults
+              ),
+            ])
+        llmCall = result.execution
 
         const durationMs = Date.now() - startTime
         checkpointManager.updatePhase(checkpoint, question.questionId, "evaluate", {
@@ -78,6 +95,8 @@ export async function runEvaluatePhase(
           score: result.score,
           label: result.label,
           explanation: result.explanation,
+          llmCall,
+          llmCalls: llmCall ? [...priorLlmCalls, llmCall] : priorLlmCalls,
           retrievalMetrics,
           completedAt: new Date().toISOString(),
           durationMs,
@@ -94,10 +113,13 @@ export async function runEvaluatePhase(
 
         return { questionId: question.questionId, durationMs, label: result.label }
       } catch (e) {
+        llmCall ||= cliCallTelemetryFromError(e)
         const error = e instanceof Error ? e.message : String(e)
         checkpointManager.updatePhase(checkpoint, question.questionId, "evaluate", {
           status: "failed",
           error,
+          llmCall,
+          llmCalls: llmCall ? [...priorLlmCalls, llmCall] : priorLlmCalls,
         })
         logger.error(`Failed to evaluate ${question.questionId}: ${error}`)
         throw new Error(
@@ -107,5 +129,26 @@ export async function runEvaluatePhase(
     }
   )
 
+  updateJudgeCliLedger(checkpoint, checkpointManager)
+
   logger.success("Evaluate phase complete")
+}
+
+function updateJudgeCliLedger(
+  checkpoint: RunCheckpoint,
+  checkpointManager: CheckpointManager
+): void {
+  if (!checkpoint.judgeProvenance) return
+  const phases = Object.values(checkpoint.questions).map((question) => question.phases.evaluate)
+  const ledger = summarizeCliLedger(phases)
+  if (ledger.callCount === 0) return
+  Object.assign(checkpoint.judgeProvenance, {
+    callCount: ledger.callCount,
+    retryCount: ledger.retryCount,
+    executionIdentityCount: ledger.executionIdentityCount,
+    mixedExecutionIdentity: ledger.mixedExecutionIdentity,
+    callLedgerComplete: ledger.callLedgerComplete,
+  })
+  reconcileCliProvenanceIdentity(checkpoint.judgeProvenance, ledger.calls)
+  checkpointManager.save(checkpoint)
 }
