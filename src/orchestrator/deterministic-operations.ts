@@ -45,6 +45,14 @@ function normalizedNumber(value: number): string {
   return String(value).replace(/\.0+$/, "")
 }
 
+function normalizeExactMatchText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+}
+
 function valueAppearsInQuote(value: number, quote: string): boolean {
   const escaped = normalizedNumber(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   return new RegExp(`(^|[^\\d])${escaped.replace(/\\\./g, "[.,]")}(?=$|[^\\d])`).test(
@@ -78,7 +86,10 @@ function cite(
   const item = context[operand.evidenceIndex]
   if (!record(item) || typeof item.content !== "string" || !record(item.metadata))
     return { reason: "operand evidence index is not a card item" }
-  if (!operand.quote || !item.content.includes(operand.quote))
+  if (
+    !operand.quote ||
+    !normalizeExactMatchText(item.content).includes(normalizeExactMatchText(operand.quote))
+  )
     return { reason: "operand quote is not an exact source substring" }
   let exactRef: string
   try {
@@ -110,9 +121,13 @@ export function inferOperation(question: string): DeterministicOperation | undef
   if (/how many days|days ago|days between|date difference/.test(normalized))
     return "date_diff_days"
   if (/chronolog|in order|order of/.test(normalized)) return "order"
-  if (/\b(first|second|third|fourth)\b/.test(normalized)) return "ordinal"
-  if (/difference|how (?:much|many).*?(?:save|more|less)|minus|remain|left/.test(normalized))
+  if (
+    /difference|compar(?:e|ed|ing)\s+(?:to|with)|how (?:much|many).*?(?:save|more|less|earlier|later)|minus|remain|left/.test(
+      normalized
+    )
+  )
     return "difference"
+  if (/\b(first|second|third|fourth)\b/.test(normalized)) return "ordinal"
   if (/total|combined|altogether|sum|add/.test(normalized)) return "sum"
   if (/how many|number of|count/.test(normalized)) return "count"
   return undefined

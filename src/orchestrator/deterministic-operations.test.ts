@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   appendDeterministicTrace,
+  inferOperation,
   parseDeterministicOperationRequest,
   shouldAttemptDeterministicOperation,
   validateDeterministicOperation,
@@ -45,6 +46,47 @@ describe("deterministic operation layer", () => {
       expect(decision.trace.operandProvenance).toHaveLength(2)
       expect(appendDeterministicTrace("Question\n\nAnswer:", decision.trace)).toContain("50 usd")
     }
+  })
+  test("normalizes selector quote and dash transport before exact source matching", () => {
+    const unicodeEvidence = [
+      {
+        content: "The \u201cfirst\u2011order\u201d discount was \uff14\uff10\uff05.",
+        metadata: {
+          session_id: "unicode",
+          date: "2023-03-01",
+          role: "user",
+          exact_ref: "lcm:5:0-41",
+        },
+      },
+    ]
+    const decision = validateDeterministicOperation(
+      {
+        operation: "sum",
+        operands: [
+          {
+            evidenceIndex: 0,
+            exactRef: "lcm:5:0-41",
+            quote: 'The "first-order" discount was 40%.',
+            value: 40,
+            unit: "percent",
+          },
+        ],
+      },
+      unicodeEvidence,
+      "What was the total discount?"
+    )
+    expect(decision).toMatchObject({ status: "computed", trace: { resultValue: 40 } })
+  })
+  test("treats compared-to-first phrasing as a comparison, not an ordinal", () => {
+    expect(
+      inferOperation(
+        "Did I receive a higher percentage discount on my first order from HelloFresh, compared to my first UberEats order?"
+      )
+    ).toBe("difference")
+    expect(
+      inferOperation("How much earlier do I wake up on Fridays compared to other weekdays?")
+    ).toBe("difference")
+    expect(inferOperation("Which song was second?")).toBe("ordinal")
   })
   test("deduplicates explicit canonical count keys", () => {
     const decision = validateDeterministicOperation(
