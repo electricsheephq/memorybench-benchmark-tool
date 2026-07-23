@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   appendDeterministicTrace,
   parseDeterministicOperationRequest,
+  shouldAttemptDeterministicOperation,
   validateDeterministicOperation,
 } from "./deterministic-operations"
 
@@ -76,6 +77,43 @@ describe("deterministic operation layer", () => {
     expect(parseDeterministicOperationRequest('{"operation":"sum","operands":[]}')?.operation).toBe(
       "sum"
     )
+  })
+  test("engages by default in card mode whenever the question requires an operation", () => {
+    // The V1L1-LOSS8 regression: count/date questions in card mode must not
+    // stay `not_attempted` just because no env opt-in was exported.
+    const opQuestions = [
+      "How many health-related devices do I use in a day?",
+      "What was the page count of the two novels I finished in January and March?",
+      "How many days ago did I meet Emma?",
+      "What is the chronological order of the six events?",
+      "Which song was second?",
+      "What was the total raised by March 20?",
+      "How much would I save by taking the train?",
+    ]
+    for (const question of opQuestions) {
+      expect(shouldAttemptDeterministicOperation(question, "evidence_cards_v1", undefined)).toBe(
+        true
+      )
+    }
+    // No operation required -> no selector call (and no extra LLM spend).
+    expect(
+      shouldAttemptDeterministicOperation(
+        "Where do I currently keep my old sneakers?",
+        "evidence_cards_v1",
+        undefined
+      )
+    ).toBe(false)
+  })
+  test("honors presentation mode and env force/kill overrides", () => {
+    const question = "How many workshops did I attend?"
+    // Never outside card mode: operand citations require card exact refs.
+    expect(shouldAttemptDeterministicOperation(question, "raw_json_v1", undefined)).toBe(false)
+    expect(shouldAttemptDeterministicOperation(question, "raw_json_v1", "1")).toBe(false)
+    // "0" is a kill switch, "1" forces attempts even without an inferred op.
+    expect(shouldAttemptDeterministicOperation(question, "evidence_cards_v1", "0")).toBe(false)
+    expect(
+      shouldAttemptDeterministicOperation("What did I say about Denver?", "evidence_cards_v1", "1")
+    ).toBe(true)
   })
   test("calculates date differences from exactly two cited canonical dates", () => {
     const decision = validateDeterministicOperation(

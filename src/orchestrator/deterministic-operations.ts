@@ -105,7 +105,7 @@ function validateNumericOperand(
   return citation
 }
 
-function inferOperation(question: string): DeterministicOperation | undefined {
+export function inferOperation(question: string): DeterministicOperation | undefined {
   const normalized = question.toLowerCase()
   if (/how many days|days ago|days between|date difference/.test(normalized))
     return "date_diff_days"
@@ -116,6 +116,35 @@ function inferOperation(question: string): DeterministicOperation | undefined {
   if (/total|combined|altogether|sum|add/.test(normalized)) return "sum"
   if (/how many|number of|count/.test(normalized)) return "count"
   return undefined
+}
+
+/**
+ * Engagement predicate for the deterministic-operation layer (C2).
+ *
+ * C2 is part of the evidence-card arm: in card mode it engages by default on
+ * every question whose phrasing requires a supported operation (count, sum,
+ * difference, date arithmetic, ordering, ordinal selection). It previously
+ * required an explicit HERMES_MB_DETERMINISTIC_OPERATIONS=1 opt-in that the
+ * clone-and-resume launch paths never set, so real card-mode runs recorded
+ * `not_attempted` on the exact count/date questions C2 was built for
+ * (V1L1-LOSS8 diagnostic, 6/6 card-caused losses).
+ *
+ * Env override semantics:
+ *   unset  -> attempt in card mode when the question requires an operation
+ *   "1"    -> attempt on every card-mode question (force)
+ *   "0"    -> never attempt (kill switch)
+ * Never engages outside evidence-card mode: operand citation validates exact
+ * card references, which only the card renderer produces.
+ */
+export function shouldAttemptDeterministicOperation(
+  question: string,
+  presentationMode: string,
+  envSetting: string | undefined = process.env.HERMES_MB_DETERMINISTIC_OPERATIONS
+): boolean {
+  if (presentationMode !== "evidence_cards_v1") return false
+  if (envSetting === "0") return false
+  if (envSetting === "1") return true
+  return inferOperation(question) !== undefined
 }
 
 export function parseDeterministicOperationRequest(

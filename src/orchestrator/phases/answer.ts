@@ -22,6 +22,7 @@ import {
   appendDeterministicTrace,
   buildDeterministicOperationSelectorPrompt,
   parseDeterministicOperationRequest,
+  shouldAttemptDeterministicOperation,
   validateDeterministicOperation,
 } from "../deterministic-operations"
 import { ConcurrentExecutor } from "../concurrent"
@@ -201,10 +202,7 @@ export async function runAnswerPhase(
         let deterministicOperation: NonNullable<
           import("../../types/checkpoint").AnswerPhaseCheckpoint["deterministicOperation"]
         > = { status: "not_attempted" }
-        if (
-          process.env.HERMES_MB_DETERMINISTIC_OPERATIONS === "1" &&
-          presentationMode === "evidence_cards_v1"
-        ) {
+        if (shouldAttemptDeterministicOperation(question.question, presentationMode)) {
           try {
             const selectorPrompt = buildDeterministicOperationSelectorPrompt(
               question.question,
