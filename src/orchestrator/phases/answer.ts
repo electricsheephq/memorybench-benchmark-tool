@@ -11,7 +11,19 @@ import { config } from "../../utils/config"
 import { logger } from "../../utils/logger"
 import { getModelConfig, ModelConfig, DEFAULT_ANSWERING_MODEL } from "../../utils/models"
 import { buildDefaultAnswerPrompt } from "../../prompts/defaults"
+import {
+  buildEvidenceCardAnswerPrompt,
+  renderEvidenceCards,
+  type AnswerPresentationMode,
+  type EvidenceCardPresentation,
+} from "../../prompts/evidence-cards"
 import { buildContextString } from "../../types/prompts"
+import {
+  appendDeterministicTrace,
+  buildDeterministicOperationSelectorPrompt,
+  parseDeterministicOperationRequest,
+  validateDeterministicOperation,
+} from "../deterministic-operations"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
 import { countTokens } from "../../utils/tokens"
@@ -60,21 +72,42 @@ export function buildAnswerPrompt(
   question: string,
   context: unknown[],
   questionDate?: string,
-  provider?: Provider
+  provider?: Provider,
+  presentationMode: AnswerPresentationMode = "raw_json_v1"
 ): string {
+  return buildAnswerPromptWithPresentation(
+    question,
+    context,
+    questionDate,
+    provider,
+    presentationMode
+  ).prompt
+}
+
+export function buildAnswerPromptWithPresentation(
+  question: string,
+  context: unknown[],
+  questionDate?: string,
+  provider?: Provider,
+  presentationMode: AnswerPresentationMode = "raw_json_v1"
+): { prompt: string; presentation?: EvidenceCardPresentation } {
+  if (presentationMode === "evidence_cards_v1") {
+    return buildEvidenceCardAnswerPrompt(question, context, questionDate)
+  }
   if (provider?.prompts?.answerPrompt) {
     const customPrompt = provider.prompts.answerPrompt
     if (typeof customPrompt === "function") {
-      return customPrompt(question, context, questionDate)
+      return { prompt: customPrompt(question, context, questionDate) }
     }
     const contextStr = buildContextString(context)
-    return customPrompt
-      .replace("{{question}}", question)
-      .replace("{{questionDate}}", questionDate || "Not specified")
-      .replace("{{context}}", contextStr)
+    return {
+      prompt: customPrompt
+        .replace("{{question}}", question)
+        .replace("{{questionDate}}", questionDate || "Not specified")
+        .replace("{{context}}", contextStr),
+    }
   }
-
-  return buildDefaultAnswerPrompt(question, context, questionDate)
+  return { prompt: buildDefaultAnswerPrompt(question, context, questionDate) }
 }
 
 export async function runAnswerPhase(
@@ -149,8 +182,71 @@ export async function runAnswerPhase(
         const context: unknown[] = searchData.results || []
         const questionDate = checkpoint.questions[question.questionId]?.questionDate
 
-        const basePrompt = buildAnswerPrompt(question.question, [], questionDate, provider)
-        const prompt = buildAnswerPrompt(question.question, context, questionDate, provider)
+        const presentationMode = checkpoint.answerPresentationMode || "raw_json_v1"
+        const basePrompt = buildAnswerPromptWithPresentation(
+          question.question,
+          [],
+          questionDate,
+          provider,
+          presentationMode
+        ).prompt
+        const promptBuild = buildAnswerPromptWithPresentation(
+          question.question,
+          context,
+          questionDate,
+          provider,
+          presentationMode
+        )
+        let prompt = promptBuild.prompt
+        let deterministicOperation: NonNullable<
+          import("../../types/checkpoint").AnswerPhaseCheckpoint["deterministicOperation"]
+        > = { status: "not_attempted" }
+        if (
+          process.env.HERMES_MB_DETERMINISTIC_OPERATIONS === "1" &&
+          presentationMode === "evidence_cards_v1"
+        ) {
+          try {
+            const selectorPrompt = buildDeterministicOperationSelectorPrompt(
+              question.question,
+              renderEvidenceCards(context).text,
+              questionDate
+            )
+            const selectorText = useCli
+              ? await cliComplete(selectorPrompt, { role: "answerer", retry: false })
+              : (
+                  await generateText({
+                    model: client!(modelConfig.id),
+                    prompt: selectorPrompt,
+                    maxTokens: 700,
+                  } as Parameters<typeof generateText>[0])
+                ).text
+            const request = parseDeterministicOperationRequest(selectorText)
+            if (!request)
+              deterministicOperation = {
+                status: "fallback",
+                reason: "selector returned invalid typed operands",
+              }
+            else {
+              const decision = validateDeterministicOperation(
+                request,
+                context,
+                question.question,
+                questionDate
+              )
+              deterministicOperation =
+                decision.status === "computed"
+                  ? { status: "computed", trace: decision.trace }
+                  : { status: "fallback", reason: decision.reason }
+              if (decision.status === "computed")
+                prompt = appendDeterministicTrace(prompt, decision.trace)
+            }
+          } catch (error) {
+            deterministicOperation = {
+              status: "fallback",
+              reason: error instanceof Error ? error.message : "operand extraction failed",
+            }
+          }
+        }
 
         const basePromptTokens = countTokens(basePrompt, modelConfig)
         const promptTokens = countTokens(prompt, modelConfig)
@@ -187,6 +283,8 @@ export async function runAnswerPhase(
           promptTokens,
           basePromptTokens,
           contextTokens,
+          answerPresentation: promptBuild.presentation,
+          deterministicOperation,
           llmCall,
           llmCalls: llmCall ? [...priorLlmCalls, llmCall] : priorLlmCalls,
           completedAt: new Date().toISOString(),

@@ -58,6 +58,12 @@ export interface AnswerPhaseCheckpoint {
   promptTokens?: number
   basePromptTokens?: number
   contextTokens?: number
+  answerPresentation?: import("../prompts/evidence-cards").EvidenceCardPresentation
+  deterministicOperation?: {
+    status: "computed" | "fallback" | "not_attempted"
+    reason?: string
+    trace?: import("../orchestrator/deterministic-operations").DeterministicOperationTrace
+  }
   llmCall?: import("../utils/cli-llm").CliCallTelemetry
   llmCalls?: import("../utils/cli-llm").CliCallTelemetry[]
   startedAt?: string
@@ -152,6 +158,7 @@ export interface RunCheckpoint {
   benchmark: string
   judge: string
   answeringModel: string
+  answerPresentationMode?: import("../prompts/evidence-cards").AnswerPresentationMode
   answererProvenance?: LlmExecutionProvenance
   judgeProvenance?: LlmExecutionProvenance
   createdAt: string
