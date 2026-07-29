@@ -1,16 +1,53 @@
 {
   "version": 1,
   "worktrees": {
-    "harness": {"path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep", "git_sha": "2c20cee72d65dfc3822831a5f1b158b5da6be180", "clean": false},
-    "product": {"path": "/Volumes/LEXAR/hermes-work/hermes-lcm", "git_sha": "543e9ea061bb355505cbb9497d26974e440ad9cf", "clean": true}
+    "harness": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep",
+      "git_sha": "2c20cee72d65dfc3822831a5f1b158b5da6be180",
+      "clean": false
+    },
+    "product": {
+      "path": "/Volumes/LEXAR/hermes-work/hermes-lcm",
+      "git_sha": "543e9ea061bb355505cbb9497d26974e440ad9cf",
+      "clean": true
+    }
   },
-  "binaries": {"codex": {"name": "codex", "sha256": "1da3f4e0e96028b8a771814293c3033dafd1971f943f6c7e79b0897fe705f590"}},
+  "binaries": {
+    "codex": {
+      "name": "codex",
+      "sha256": "ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02"
+    }
+  },
   "files": {
-    "locomo10": {"path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/data/locomo10.json", "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"},
-    "judge_prompts": {"path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/prompts/defaults.ts", "sha256": "ca5b2a04b4eadd9d77fce72d58b5dfa34949e19ed61c01d1beb9ff399595500e"},
-    "hermes_provider": {"path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/providers/hermes-lcm/index.ts", "sha256": "b5e542b0e3674566d81225a7eac0fd8564edfb850622fdced8091f6940bb8065"}
+    "locomo10": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/data/locomo10.json",
+      "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
+    },
+    "judge_prompts": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/prompts/defaults.ts",
+      "sha256": "ca5b2a04b4eadd9d77fce72d58b5dfa34949e19ed61c01d1beb9ff399595500e"
+    },
+    "hermes_provider": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/providers/hermes-lcm/index.ts",
+      "sha256": "b5e542b0e3674566d81225a7eac0fd8564edfb850622fdced8091f6940bb8065"
+    }
   },
   "env": {
-    "HERMES_LCM_REPO": "/Volumes/LEXAR/hermes-work/hermes-lcm", "HERMES_MB_PROVIDER": "fastembed", "HERMES_MB_LLM_CLI": "codex", "HERMES_MB_CODEX_MODEL": "gpt-5.6-sol", "HERMES_MB_CODEX_ANSWER_EFFORT": "medium", "HERMES_MB_CODEX_JUDGE_EFFORT": "low", "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1"
-  }
+    "HERMES_LCM_REPO": "/Volumes/LEXAR/hermes-work/hermes-lcm",
+    "HERMES_MB_PROVIDER": "fastembed",
+    "HERMES_MB_LLM_CLI": "codex",
+    "HERMES_MB_CODEX_MODEL": "gpt-5.6-sol",
+    "HERMES_MB_CODEX_ANSWER_EFFORT": "medium",
+    "HERMES_MB_CODEX_JUDGE_EFFORT": "low",
+    "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1"
+  },
+  "amendments": [
+    {
+      "date": "2026-07-30",
+      "field": "binaries.codex.sha256",
+      "old": "1da3f4e0e96028b8a771814293c3033dafd1971f943f6c7e79b0897fe705f590",
+      "new": "ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02",
+      "reason": "codex CLI auto-upgraded (now 0.146.0) between prep and execution; the prep-time binary no longer exists on disk. Explicit PRE-RUN re-pin, no results existed (section 6e.13: the rule forbids SILENT drift). Both A/A' arms and any later scored LoCoMo run must use this transport or re-pin explicitly again."
+    }
+  ]
 }
