@@ -69,9 +69,7 @@ class BridgeHandle {
       )
     })
     this.proc.on("error", (error) => {
-      this.markDead(
-        new Error(`hermes-lcm bridge (${this.tag}) process error: ${error.message}`)
-      )
+      this.markDead(new Error(`hermes-lcm bridge (${this.tag}) process error: ${error.message}`))
     })
   }
 
@@ -281,6 +279,14 @@ export class HermesLcmProvider implements Provider {
     } finally {
       handle.close()
     }
+  }
+
+  /** Close bridge processes without deleting their on-disk stores. */
+  close(): void {
+    for (const handle of this.handles.values()) {
+      handle.close()
+    }
+    this.handles.clear()
   }
 }
 

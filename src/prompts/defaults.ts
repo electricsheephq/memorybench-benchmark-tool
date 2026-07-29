@@ -58,8 +58,22 @@ Respond with ONLY a JSON object:
 {"score": 1, "label": "correct", "explanation": "..."} if the response satisfies the rubric
 {"score": 0, "label": "incorrect", "explanation": "..."} if the response does not satisfy the rubric`
 
+const EXACT_JUDGE_PROMPTS: Record<string, string> = {
+  // LoCoMo category ids and their underscore/short-name spellings.
+  adversarial: ABSTENTION_JUDGE_PROMPT,
+  temporal: TEMPORAL_JUDGE_PROMPT,
+  "single-hop": DEFAULT_JUDGE_PROMPT,
+  single_hop: DEFAULT_JUDGE_PROMPT,
+  "multi-hop": DEFAULT_JUDGE_PROMPT,
+  multi_hop: DEFAULT_JUDGE_PROMPT,
+  "world-knowledge": DEFAULT_JUDGE_PROMPT,
+  world: DEFAULT_JUDGE_PROMPT,
+}
+
 export function getJudgePromptForType(questionType: string): string {
   const type = questionType.toLowerCase()
+  const exactPrompt = EXACT_JUDGE_PROMPTS[type]
+  if (exactPrompt) return exactPrompt
 
   if (type.includes("abstention") || type.includes("adversarial")) {
     return ABSTENTION_JUDGE_PROMPT
