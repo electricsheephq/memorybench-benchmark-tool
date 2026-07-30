@@ -45,10 +45,10 @@ def test_ingest_maps_documents_and_retrieve_returns_documents(provider: HermesLc
 
     session = json.loads(documents[0].content)
     assert session["sessionId"] == "sample-session_1"
-    assert session["metadata"] == {"date": "2024-01-02"}
+    assert session["metadata"] == {"date": "2024-01-02", "speakerA": "Alice"}
     assert session["messages"] == [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "world"},
+        {"role": "user", "content": "hello", "speaker": "Alice"},
+        {"role": "assistant", "content": "world", "speaker": "Bob"},
     ]
 
 
@@ -62,6 +62,12 @@ def test_raw_response_is_results_only(provider: HermesLcmProvider) -> None:
     assert "degraded_reason" not in raw
     assert "internal" not in raw
     assert "must-not-reach-raw-response" not in json.dumps(raw)
+    # Per-result internals must not reach the graded prompt either: metadata
+    # is projected onto the reader-visible allowlist only.
+    allowed = {"session_id", "date", "timestamp", "role", "kind"}
+    for result in raw["results"]:
+        assert set(result) == {"content", "metadata"}
+        assert set(result["metadata"]) <= allowed
 
 
 @pytest.mark.parametrize("mode", ["crash", "nonzero", "malformed"])

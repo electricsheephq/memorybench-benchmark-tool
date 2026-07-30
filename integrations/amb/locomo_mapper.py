@@ -52,7 +52,7 @@ def document_to_session(document: Any) -> dict[str, Any]:
     document_id = _field(document, "id")
     if document_id is None:
         raise ValueError("LoCoMo document is missing id")
-    turns, speaker_a, _speaker_b = _turns(document)
+    turns, speaker_a, speaker_b = _turns(document)
     if speaker_a is None:
         for turn in turns:
             if turn.get("speaker") is not None:
@@ -70,12 +70,22 @@ def document_to_session(document: Any) -> dict[str, Any]:
         text = turn.get("text", turn.get("content"))
         if text is None:
             raise ValueError("LoCoMo turn is missing text/content")
-        messages.append({"role": role, "content": str(text)})
+        message: dict[str, str] = {"role": role, "content": str(text)}
+        # Payload parity with the TS lane: the bridge ignores speaker fields
+        # today (the F46 §3 misattribution surface), but a speaker-aware bridge
+        # must see identical payloads from both lanes.
+        if speaker is not None:
+            message["speaker"] = str(speaker)
+        messages.append(message)
 
     metadata: dict[str, str] = {}
     timestamp = _field(document, "timestamp")
     if timestamp is not None:
         metadata["date"] = str(timestamp)
+    if speaker_a is not None:
+        metadata["speakerA"] = speaker_a
+    if speaker_b is not None:
+        metadata["speakerB"] = speaker_b
     return {"sessionId": str(document_id), "metadata": metadata, "messages": messages}
 
 

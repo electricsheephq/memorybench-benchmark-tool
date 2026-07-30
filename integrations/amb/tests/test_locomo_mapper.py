@@ -24,11 +24,11 @@ def test_maps_raw_locomo_turns_to_bridge_session() -> None:
 
     assert document_to_session(document) == {
         "sessionId": "sample-session_1",
-        "metadata": {"date": "2024-01-02T03:04:05Z"},
+        "metadata": {"date": "2024-01-02T03:04:05Z", "speakerA": "Alice"},
         "messages": [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there"},
-            {"role": "user", "content": "Remember this"},
+            {"role": "user", "content": "Hello", "speaker": "Alice"},
+            {"role": "assistant", "content": "Hi there", "speaker": "Bob"},
+            {"role": "user", "content": "Remember this", "speaker": "Alice"},
         ],
     }
 
@@ -51,10 +51,14 @@ def test_honors_explicit_speaker_metadata_wrapper() -> None:
 
     session = document_to_session(document)
     assert session["messages"] == [
-        {"role": "assistant", "content": "answer"},
-        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer", "speaker": "Person B"},
+        {"role": "user", "content": "question", "speaker": "Person A"},
     ]
-    assert session["metadata"] == {"date": "2024-02-03"}
+    assert session["metadata"] == {
+        "date": "2024-02-03",
+        "speakerA": "Person A",
+        "speakerB": "Person B",
+    }
 
 
 @pytest.mark.parametrize(

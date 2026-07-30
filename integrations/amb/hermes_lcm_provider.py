@@ -11,7 +11,6 @@ time, and its ``Document`` object is used structurally here.
 
 from __future__ import annotations
 
-import copy
 import asyncio
 import json
 import os
@@ -289,7 +288,7 @@ class HermesLcmProvider:
         env = self._build_env()
         try:
             process = subprocess.Popen(
-                [self._python_executable, str(bridge_path), "serve"],
+                [self._python_executable, str(bridge_path)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -402,8 +401,21 @@ class HermesLcmProvider:
             )
 
         # AMB may serialize raw_response into the graded answer prompt.  Never
-        # expose bridge provenance/degraded/internal top-level fields there.
-        return documents, {"results": copy.deepcopy(results)}
+        # expose bridge provenance/degraded/internal fields there — neither the
+        # top-level ones nor per-result internals (score/arms/store_id/
+        # chunk_span/...): the graded surface carries only what our own harness
+        # renders to a reader.
+        sanitized = []
+        for result in results:
+            metadata = result.get("metadata")
+            metadata_dict = dict(metadata) if isinstance(metadata, Mapping) else {}
+            kept = {
+                key: metadata_dict[key]
+                for key in ("session_id", "date", "timestamp", "role", "kind")
+                if metadata_dict.get(key) is not None
+            }
+            sanitized.append({"content": str(result["content"]), "metadata": kept})
+        return documents, {"results": sanitized}
 
     async def async_retrieve(
         self,
