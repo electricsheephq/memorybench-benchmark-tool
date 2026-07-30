@@ -45,6 +45,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from datetime import date
 from pathlib import Path
@@ -97,6 +98,133 @@ def _positive_int_env(name: str, default: int) -> int:
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive integer")
     return value
+
+
+def _parse_fusion_mode(raw: str | None = None) -> tuple[int, int, int] | None:
+    """Parse the declared bridge fusion mode, failing closed on typos.
+
+    The only supported non-default spelling is
+    ``quota:fts=<N>,chunk=<N>[,floor=<N>]`` with non-negative decimal
+    integers.  ``None``/the empty string preserve the ordinary path.
+    """
+    value = os.environ.get("HERMES_MB_FUSION") if raw is None else raw
+    if value is None or value == "":
+        return None
+    match = re.fullmatch(
+        r"quota:fts=([0-9]+),chunk=([0-9]+)(?:,floor=([0-9]+))?", value
+    )
+    if match is None:
+        raise RuntimeError(
+            "HERMES_MB_FUSION must be empty or match "
+            "quota:fts=<N>,chunk=<N>[,floor=<N>]"
+        )
+    q_fts = int(match.group(1))
+    q_chunk = int(match.group(2))
+    floor_fts = int(match.group(3) or 0)
+    if q_fts == 0 and q_chunk == 0 and floor_fts == 0:
+        # All-zero pulls would return empty retrieval under ok=true — a
+        # nonsensical declared config must fail closed, not look successful.
+        raise RuntimeError(
+            "HERMES_MB_FUSION quota requires at least one non-zero pull "
+            "(fts, chunk, or floor)"
+        )
+    return q_fts, q_chunk, floor_fts
+
+
+def dedup_arm(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lifted from the measured fusion replay; preserve first hit per key."""
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, Any]] = set()
+    for hit in hits:
+        key = (
+            ("node", hit.get("node_id"))
+            if hit.get("node_id") is not None
+            else ("message", hit.get("store_id"))
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(hit)
+    return selected
+
+
+def quota_merge(
+    fts_hits: list[dict[str, Any]],
+    chunk_hits: list[dict[str, Any]],
+    *,
+    limit: int,
+    q_fts: int,
+    q_chunk: int,
+    floor_fts: int,
+) -> list[dict[str, Any]]:
+    """Lift the diagnosis replay's floor-then-round-robin quota merge.
+
+    The returned wrappers retain the replay's ``{"hit": ...}`` shape and add
+    source-arm provenance needed by the bridge metadata path.
+    """
+    arms = [dedup_arm(fts_hits), dedup_arm(chunk_hits)]
+    positions = [0, 0]
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, Any]] = set()
+
+    def pull(arm_index: int, quota: int) -> int:
+        added = 0
+        while (
+            positions[arm_index] < len(arms[arm_index])
+            and added < quota
+            and len(selected) < limit
+        ):
+            hit = arms[arm_index][positions[arm_index]]
+            positions[arm_index] += 1
+            key = ("message", hit.get("store_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(
+                {
+                    "hit": dict(hit),
+                    "arm": "fts" if arm_index == 0 else "chunk",
+                    "arm_rank": positions[arm_index],
+                }
+            )
+            added += 1
+        return added
+
+    pull(0, min(max(0, int(floor_fts)), limit))
+    while len(selected) < limit:
+        added = pull(0, q_fts) + pull(1, q_chunk)
+        if added == 0:
+            break
+    return selected
+
+
+def _collect_quota_arms(
+    engine: Any,
+    query: str,
+    provider: Any,
+    *,
+    lcm_tools: Any,
+    deadline: float,
+) -> dict[str, list[dict[str, Any]]]:
+    """Run the replay's raw FTS and chunk-KNN arms, 200 candidates each."""
+    fts_hits, fts_error = lcm_tools._lcm_recall_fts_arm(
+        engine, query, candidate_limit=200, deadline=deadline
+    )
+    if fts_error is not None:
+        raise RuntimeError(f"FTS arm failed: {fts_error}")
+    query_vector = lcm_tools._lcm_grep_embed_query(
+        provider,
+        query,
+        remaining_s=max(1.0, deadline - time.monotonic()),
+    )
+    chunk_result = lcm_tools._lcm_recall_chunk_arm(
+        engine,
+        query_vector=query_vector,
+        provider=provider,
+        candidate_limit=200,
+        deadline=deadline,
+    )
+    return {"fts": list(fts_hits), "chunk": list(chunk_result[0])}
 
 
 def _content_window(
@@ -203,7 +331,7 @@ def _hydrate_answer_ready_hit(
 
 
 def _metadata_for_recall_hit(
-    hit: dict[str, Any], dates: dict[str, str]
+    hit: dict[str, Any], dates: dict[str, str], *, include_arm_rank: bool = False
 ) -> dict[str, Any]:
     """Translate only fields already returned by production lcm_recall."""
     session_id = hit.get("session_id")
@@ -227,9 +355,12 @@ def _metadata_for_recall_hit(
         "content_offset",
         "content_returned_chars",
         "expand_hint",
+        "fusion_mode",
     ):
         if hit.get(facet) is not None:
             metadata[facet] = hit.get(facet)
+    if include_arm_rank and hit.get("arm_rank") is not None:
+        metadata["arm_rank"] = hit.get("arm_rank")
     if hit.get("kind") == "summary":
         metadata["node_id"] = hit.get("node_id")
     else:
@@ -482,12 +613,134 @@ class Bridge:
 
     # -- search ---------------------------------------------------------------
 
+    def _search_quota(
+        self, req: dict[str, Any], fusion: tuple[int, int, int]
+    ) -> dict[str, Any]:
+        """Run the declared measured FTS+chunk quota policy.
+
+        The summary arm is intentionally not consulted: ``quota:fts=1,chunk=2``
+        is the measured two-arm policy selected by the diagnosis replay.
+        """
+        container_tag = str(req["containerTag"])
+        query = str(req.get("query", ""))
+        limit = int(req.get("limit", 25))
+        q_fts, q_chunk, floor_fts = fusion
+        fusion_mode = (
+            f"quota:fts={q_fts},chunk={q_chunk},floor={floor_fts}"
+        )
+
+        from hermes_lcm.dag import SummaryDAG
+        from hermes_lcm.store import MessageStore
+        from hermes_lcm.vector_store import VectorStore
+        import hermes_lcm.tools as lcm_tools
+
+        db_path = self._db_path(container_tag)
+        config = self._config(db_path)
+        store = MessageStore(str(db_path), ingest_protection_config=config)
+        dag = SummaryDAG(str(db_path))
+        vector_store = VectorStore(str(db_path), config=config)
+        dates = self._load_dates(container_tag)
+        try:
+            fresh_session = f"__hermes_lcm_recall_probe__{container_tag}"
+            engine = SimpleNamespace(
+                _config=config,
+                _store=store,
+                _dag=dag,
+                _hermes_home=str(self.workdir),
+                current_session_id=fresh_session,
+            )
+            cache_key = (
+                self.provider_name.strip().lower(),
+                str(self.embedder.model_id).strip(),
+            )
+            engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
+
+            # Stay under the TS handle's 180 s REQUEST_TIMEOUT_MS: a bridge
+            # deadline beyond the caller timeout means the caller kills the
+            # handle while the bridge still grinds and the answer is lost.
+            deadline_s = float(
+                os.environ.get("HERMES_MB_QUOTA_SEARCH_DEADLINE_S", "170")
+            )
+            arms = _collect_quota_arms(
+                engine,
+                query,
+                self.embedder,
+                lcm_tools=lcm_tools,
+                deadline=time.monotonic() + deadline_s,
+            )
+            selected = quota_merge(
+                arms["fts"],
+                arms["chunk"],
+                limit=limit,
+                q_fts=q_fts,
+                q_chunk=q_chunk,
+                floor_fts=floor_fts,
+            )
+
+            results: list[dict[str, Any]] = []
+            bridge_hydrated_count = 0
+            for selected_entry in selected[:limit]:
+                raw_hit = dict(selected_entry["hit"])
+                raw_hit["arms"] = selected_entry["arm"]
+                raw_hit["arm_rank"] = selected_entry["arm_rank"]
+                # The TS normalizer persists only per-hit results; the quota
+                # parameters must survive into checkpoints, so each hit
+                # carries the fusion mode.
+                raw_hit["fusion_mode"] = fusion_mode
+                hit = _hydrate_answer_ready_hit(
+                    raw_hit,
+                    store=store,
+                    dag=dag,
+                    query=query,
+                    char_cap=self.answer_ready_content_chars,
+                )
+                if (
+                    hit is not raw_hit
+                    and hit.get("content") is not None
+                    and hit.get("content_chars") is not None
+                    and hit.get("content_returned_chars") is not None
+                    and hit.get("content_truncated") is not None
+                ):
+                    bridge_hydrated_count += 1
+                content = hit.get("content") or hit.get("snippet") or ""
+                metadata = _metadata_for_recall_hit(
+                    hit, dates, include_arm_rank=True
+                )
+                results.append({"content": content, "metadata": metadata})
+        finally:
+            vector_store.close()
+            dag.close()
+            store.close()
+
+        provenance = {
+            "mode": "quota",
+            "fusion_mode": fusion_mode,
+            "arms_run": ["fts", "chunk"],
+            "candidate_limit": 200,
+            "bridge_answer_ready": {
+                "content_char_cap": self.answer_ready_content_chars,
+                "exact_read_hydrated_count": bridge_hydrated_count,
+            },
+        }
+        return {
+            "ok": True,
+            "results": results[:limit],
+            "provenance": provenance,
+            "degraded": False,
+            "degraded_reason": None,
+            "fusion_mode": fusion_mode,
+        }
+
     def search(self, req: dict[str, Any]) -> dict[str, Any]:
         if self.embedder is None:
             raise RuntimeError("search before initialize")
         container_tag = str(req["containerTag"])
         query = str(req.get("query", ""))
         limit = int(req.get("limit", 25))
+
+        fusion = _parse_fusion_mode()
+        if fusion is not None:
+            return self._search_quota(req, fusion)
 
         from hermes_lcm.dag import SummaryDAG
         from hermes_lcm.store import MessageStore
