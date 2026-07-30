@@ -65,9 +65,20 @@ def parse_trajectory(traj_text: str) -> list[TrajectoryStep]:
         match = _STEP_RE.match(traj_text, offset)
         if match is None:
             raise ValueError(f"malformed trajectory segment at offset {offset}")
+        turn_idx = int(match.group("turn_idx"))
+        if steps and turn_idx != steps[-1].turn_idx + 1:
+            # The flattened format is inherently ambiguous: an observation
+            # containing a blank line followed by step-shaped text would
+            # silently split. Sequential step numbers catch nearly all such
+            # spurious splits (a quoted block rarely continues the sequence).
+            raise ValueError(
+                f"non-sequential step number {turn_idx} after "
+                f"{steps[-1].turn_idx} at offset {offset} — possible "
+                "mis-split of an observation containing step-shaped text"
+            )
         steps.append(
             TrajectoryStep(
-                turn_idx=int(match.group("turn_idx")),
+                turn_idx=turn_idx,
                 action=match.group("action"),
                 observation=match.group("observation"),
             )
