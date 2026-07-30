@@ -88,21 +88,26 @@ class HermesLcmMethod:
     def _build_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        sibling_repo = self._repo_root().parent / "hermes-lcm"
-        default_repo = sibling_repo if sibling_repo.is_dir() else self._repo_root()
-        env.setdefault("HERMES_LCM_REPO", str(default_repo))
+        if not env.get("HERMES_LCM_REPO"):
+            sibling_repo = self._repo_root().parent / "hermes-lcm"
+            # Fail closed rather than pointing the bridge at THIS repo: the
+            # bridge imports hermes_lcm.* from the checkout, so a wrong path
+            # can only produce a confusing startup failure later.
+            if not (sibling_repo / "hermes_lcm").is_dir() and not (
+                sibling_repo / "chunking.py"
+            ).is_file():
+                raise RuntimeError(
+                    "HERMES_LCM_REPO is not set and no hermes-lcm checkout "
+                    f"found at {sibling_repo}; set HERMES_LCM_REPO to a "
+                    "product checkout"
+                )
+            env["HERMES_LCM_REPO"] = str(sibling_repo)
 
         if self._workdir is None:
-            # Keep bridge-owned scratch on the requested LEXAR evidence volume,
-            # rather than silently creating benchmark state under /tmp.
-            artifact_root = Path(
-                "/Volumes/LEXAR/Codex/session-notes/2026-07-30/"
-                "hermes-ama-adapter/artifacts"
-            )
-            artifact_root.mkdir(parents=True, exist_ok=True)
-            self._workdir = Path(
-                tempfile.mkdtemp(prefix="hermes-lcm-ama-", dir=str(artifact_root))
-            )
+            # Portable default: a system temp dir the method owns and removes.
+            # Persistent run artifacts (e.g. an evidence volume) are a RUN
+            # config choice — set HERMES_MB_WORKDIR explicitly for that.
+            self._workdir = Path(tempfile.mkdtemp(prefix="hermes-lcm-ama-"))
             self._owns_workdir = True
         self._workdir.mkdir(parents=True, exist_ok=True)
         env["HERMES_MB_WORKDIR"] = str(self._workdir)
@@ -172,10 +177,18 @@ class HermesLcmMethod:
         bridge = self._ensure_bridge()
         container_tag = self._new_container_tag()
         messages: list[dict[str, str]] = []
+        if str(task).strip():
+            # The bridge indexes only message content (metadata carries dates
+            # alone), so the task must BE content or task-dependent episodes
+            # lose their framing at retrieval time.
+            messages.append({"role": "user", "content": f"Task: {task}"})
         for step in steps:
             messages.append({"role": "assistant", "content": step.action})
             messages.append({"role": "user", "content": step.observation})
 
+        # Register BEFORE ingest: a mid-ingest failure can leave a partially
+        # written store, and cleanup() must know the tag to clear it.
+        self._containers.add(container_tag)
         bridge.request(
             {
                 "cmd": "ingest",
@@ -188,7 +201,6 @@ class HermesLcmMethod:
             },
             self._request_timeout,
         )
-        self._containers.add(container_tag)
         return container_tag
 
     @staticmethod

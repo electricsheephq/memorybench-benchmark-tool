@@ -10,6 +10,21 @@ subprocess protocol, timeout handling, and crash-loud behavior stay shared.
 Keep the AMA checkout separate and register this structural `BaseMethod`
 before its normal entry point is loaded:
 
+## Making the overlay importable from the AMA checkout
+
+This repository ships no Python packaging metadata, so the AMA process must be
+given the repo root on `PYTHONPATH` explicitly (this also provides the
+`integrations.amb` dependency the method reuses):
+
+```bash
+export PYTHONPATH="/path/to/memorybench-benchmark-tool:$PYTHONPATH"
+```
+
+Run AMA from its own checkout with that environment set; the registration
+snippet below then imports cleanly. (Alternative: symlink `integrations/` into
+the AMA checkout root — PYTHONPATH is preferred because it needs no files
+inside their tree.)
+
 ```python
 from integrations.ama.hermes_lcm_method import HermesLcmMethod
 from src.method.base_method import BaseMethod
