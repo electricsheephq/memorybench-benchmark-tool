@@ -70,9 +70,10 @@ describe("LoCoMo fixture ingestion", () => {
     await benchmark.load({ dataPath: writeFixture() })
 
     const content = benchmark.getHaystackSessions("fixture-q0")[0]?.messages[0]?.content
-    expect(content).toBe(
-      "Look what I made. [shared image: a red kite with a blue tail; img_url: https://example.test/kite.jpg]"
-    )
+    expect(content).toBe("Look what I made. [shared image: a red kite with a blue tail]")
+    // URLs never enter evidence: descriptive filenames can leak gold labels.
+    expect(content).not.toContain("img_url")
+    expect(content).not.toContain("https://")
   })
 
   test("uses adversarial_answer as adversarial ground truth", async () => {

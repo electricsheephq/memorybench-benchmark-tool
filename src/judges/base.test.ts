@@ -26,10 +26,12 @@ describe("LoCoMo judge category routing", () => {
     }
   )
 
-  test("adversarial prompt credits accurate false-premise corrections", () => {
+  test("adversarial prompt credits premise rejection without vouching for elaboration", () => {
     expect(ABSTENTION_JUDGE_PROMPT).toContain("correctly abstains")
-    expect(ABSTENTION_JUDGE_PROMPT).toContain(
-      "accurately identifies the question's false premise and corrects it"
-    )
+    expect(ABSTENTION_JUDGE_PROMPT).toContain("rejects the question's false premise")
+    // The judge has no conversation/evidence, so it must not certify the
+    // accuracy of extra asserted details -- only contradiction is scoreable.
+    expect(ABSTENTION_JUDGE_PROMPT).toContain("do not credit or penalize extra elaboration")
+    expect(ABSTENTION_JUDGE_PROMPT).toContain("contradicts the provided correct answer")
   })
 })

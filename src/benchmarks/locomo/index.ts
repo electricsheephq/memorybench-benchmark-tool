@@ -89,9 +89,10 @@ function getMessageContent(message: LoCoMoMessage): string {
   const caption = message.blip_caption?.trim()
   if (!caption) return message.text
 
-  const imageUrls = (message.img_url || []).map((url) => url.trim()).filter(Boolean)
-  const imageUrlNote = imageUrls.length > 0 ? `; img_url: ${imageUrls.join(", ")}` : ""
-  return `${message.text} [shared image: ${caption}${imageUrlNote}]`
+  // Caption only — never the URL. Descriptive filenames leak labels that were
+  // never stated in the conversation (a pinned-dataset URL slug literally
+  // contains the gold answer for one caption question).
+  return `${message.text} [shared image: ${caption}]`
 }
 
 export class LoCoMoBenchmark implements Benchmark {
