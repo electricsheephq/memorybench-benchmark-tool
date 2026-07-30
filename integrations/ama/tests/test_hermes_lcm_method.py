@@ -45,6 +45,10 @@ def test_construction_maps_steps_to_bridge_messages(
     assert session["sessionId"] == handle
     assert session["metadata"] == {"task": "update the configuration"}
     assert session["messages"] == [
+        # The task must be INDEXED content: the bridge indexes only message
+        # content, so task-dependent episodes would otherwise lose their
+        # framing at retrieval time.
+        {"role": "user", "content": "Task: update the configuration"},
         {"role": "assistant", "content": "inspect"},
         {"role": "user", "content": "found config"},
         {"role": "assistant", "content": "edit"},
