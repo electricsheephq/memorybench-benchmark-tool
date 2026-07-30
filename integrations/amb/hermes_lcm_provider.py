@@ -17,6 +17,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -234,8 +235,12 @@ class HermesLcmProvider:
             os.environ.get("HERMES_LCM_INITIALIZE_TIMEOUT_SECONDS", "300")
         )
         self._workdir: Path | None = None
+        self._owns_workdir = False
         self._env: dict[str, str] | None = None
         self._bridge: _BridgeHandle | None = None
+        # Conversation-level participant identities (keyed by container tag) so
+        # a session that opens with speaker B cannot invert roles vs its peers.
+        self._speakers_by_container: dict[str, tuple[str | None, str | None]] = {}
 
     def _repo_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
@@ -253,9 +258,11 @@ class HermesLcmProvider:
         env.setdefault("HERMES_LCM_REPO", str(default_repo))
         if self._workdir is None:
             configured = os.environ.get("HERMES_MB_WORKDIR")
-            self._workdir = Path(configured) if configured else Path(
-                tempfile.mkdtemp(prefix="hermes-lcm-amb-")
-            )
+            if configured:
+                self._workdir = Path(configured)
+            else:
+                self._workdir = Path(tempfile.mkdtemp(prefix="hermes-lcm-amb-"))
+                self._owns_workdir = True
         env["HERMES_MB_WORKDIR"] = str(self._workdir)
         env.setdefault("HERMES_MB_PROVIDER", "fastembed")
         return env
@@ -323,23 +330,48 @@ class HermesLcmProvider:
                 self._bridge.close()
                 self._bridge = None
             self._workdir = desired_workdir
+            self._owns_workdir = False
+        # A reused store (reset=False) still needs a live bridge: initialize
+        # unconditionally so the next ingest/retrieve cannot hit
+        # "provider is not initialized".
+        self.initialize()
         if not reset:
             return
-        self.initialize()
-        bridge = self._require_bridge()
-        for unit_id in sorted(unit_ids or set()):
-            bridge.request(
-                {"cmd": "clear", "containerTag": str(unit_id)}, self._request_timeout
-            )
+        if unit_ids:
+            bridge = self._require_bridge()
+            for unit_id in sorted(unit_ids):
+                bridge.request(
+                    {"cmd": "clear", "containerTag": str(unit_id)}, self._request_timeout
+                )
+        else:
+            # Full reset with no unit list: remove every bridge-owned store
+            # file (<tag>.db[-wal|-shm], <tag>.dates.json) so persisted state
+            # from a prior run cannot leak into this one.
+            workdir = self._workdir
+            if workdir is not None and workdir.is_dir():
+                for pattern in ("*.db", "*.db-wal", "*.db-shm", "*.dates.json"):
+                    for path in workdir.glob(pattern):
+                        path.unlink(missing_ok=True)
+        self._speakers_by_container.clear()
 
     def ingest(self, documents: list[Document]) -> None:
         bridge = self._require_bridge()
         for document in documents:
+            container = self._container_tag(document)
+            cached_a, cached_b = self._speakers_by_container.get(container, (None, None))
+            session = document_to_session(
+                document, speaker_a=cached_a, speaker_b=cached_b
+            )
+            metadata = session.get("metadata") or {}
+            resolved_a = metadata.get("speakerA") or cached_a
+            resolved_b = metadata.get("speakerB") or cached_b
+            if resolved_a is not None or resolved_b is not None:
+                self._speakers_by_container[container] = (resolved_a, resolved_b)
             bridge.request(
                 {
                     "cmd": "ingest",
-                    "containerTag": self._container_tag(document),
-                    "session": document_to_session(document),
+                    "containerTag": container,
+                    "session": session,
                 },
                 self._request_timeout,
             )
@@ -436,15 +468,27 @@ class HermesLcmProvider:
         user_id: str | None = None,
         query_timestamp: str | None = None,
     ) -> tuple[list[Document], dict[str, Any]]:
-        """LoCoMo has no step-scoped retrieval verb; use ordinary search."""
+        """Fail closed: the bridge has no step-scoped search verb.
 
-        del steps
-        return self.retrieve(query, k, user_id, query_timestamp)
+        Silently delegating to an unrestricted search would let memories
+        outside the requested snapshot (including LATER turns) into the graded
+        prompt — temporal leakage that inflates step-scoped results. A run
+        configured to use step scoping must fail loudly instead.
+        """
+
+        raise NotImplementedError(
+            "hermes-lcm AMB adapter does not support step-scoped retrieval; "
+            f"refusing to serve steps={steps!r} from the full store"
+        )
 
     def cleanup(self) -> None:
         bridge, self._bridge = self._bridge, None
         if bridge is not None:
             bridge.close()
+        if self._owns_workdir and self._workdir is not None:
+            shutil.rmtree(self._workdir, ignore_errors=True)
+            self._workdir = None
+            self._owns_workdir = False
 
 
 __all__ = ["BridgeProtocolError", "Document", "HermesLcmProvider"]

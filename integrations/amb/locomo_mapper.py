@@ -41,18 +41,28 @@ def _turns(document: Any) -> tuple[list[Mapping[str, Any]], str | None, str | No
     return turns, speaker_a, speaker_b
 
 
-def document_to_session(document: Any) -> dict[str, Any]:
+def document_to_session(
+    document: Any,
+    *,
+    speaker_a: str | None = None,
+    speaker_b: str | None = None,
+) -> dict[str, Any]:
     """Map one AMB LoCoMo document to the bridge's session payload.
 
     AMB stores raw ``speaker``/``text`` turn JSON in ``Document.content``.
-    The first distinct speaker follows the TS adapter's ``speaker_a`` → user
-    convention; later speakers become assistant messages.
+    Role mapping follows the TS adapter's conversation-level ``speaker_a`` →
+    user convention. DECLARED identities win: an explicit ``speaker_a`` kwarg
+    (e.g. the provider's per-conversation cache), then the payload's own
+    ``speaker_a`` field, and only then first-seen turn order — a session that
+    happens to open with speaker B must not invert every role.
     """
 
     document_id = _field(document, "id")
     if document_id is None:
         raise ValueError("LoCoMo document is missing id")
-    turns, speaker_a, speaker_b = _turns(document)
+    turns, payload_speaker_a, payload_speaker_b = _turns(document)
+    speaker_a = speaker_a if speaker_a is not None else payload_speaker_a
+    speaker_b = speaker_b if speaker_b is not None else payload_speaker_b
     if speaker_a is None:
         for turn in turns:
             if turn.get("speaker") is not None:
