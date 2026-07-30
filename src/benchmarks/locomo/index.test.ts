@@ -41,6 +41,13 @@ function writeFixture(): string {
             evidence: ["D1:1"],
             category: 5,
           },
+          {
+            question: "Did B make the kite?",
+            answer: "No",
+            adversarial_answer: "Yes",
+            evidence: ["D1:1"],
+            category: 5,
+          },
         ],
         event_summary: {},
         observation: {},
@@ -74,5 +81,12 @@ describe("LoCoMo fixture ingestion", () => {
 
     expect(benchmark.getGroundTruth("fixture-q1")).toBe("B made the kite")
     expect(benchmark.getGroundTruth("fixture-q1")).not.toBe("undefined")
+  })
+
+  test("prefers the explicit answer when an adversarial row has both fields", async () => {
+    const benchmark = new LoCoMoBenchmark()
+    await benchmark.load({ dataPath: writeFixture() })
+
+    expect(benchmark.getGroundTruth("fixture-q2")).toBe("No")
   })
 })

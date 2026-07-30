@@ -145,6 +145,11 @@ def _hydrate_answer_ready_hit(
         return hit
 
     hydrated = dict(hit)
+    # A pre-existing exact_ref encodes the OLD content window; re-hydration
+    # replaces content/offset below, so drop it and let downstream recompute
+    # from the delivered content.
+    hydrated.pop("exact_ref", None)
+    hydrated.pop("exact_ref_source", None)
     content = ""
     match_start = 0
     match_end = 0

@@ -75,7 +75,10 @@ const CATEGORY_TO_TYPE: Record<number, string> = {
 }
 
 function getGroundTruth(qa: LoCoMoItem["qa"][number], questionId: string): string {
-  const answer = qa.category === 5 ? (qa.adversarial_answer ?? qa.answer) : qa.answer
+  // Prefer the explicit answer when a category-5 row carries both fields: the
+  // pinned dataset has two such rows where adversarial_answer holds the trap
+  // value ("Yes") and answer holds the evidence-supported truth ("No").
+  const answer = qa.category === 5 ? (qa.answer ?? qa.adversarial_answer) : qa.answer
   if (answer === undefined || answer === null) {
     throw new Error(`Missing LoCoMo ground truth for question ${questionId}`)
   }
