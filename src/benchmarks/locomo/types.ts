@@ -2,11 +2,14 @@ export interface LoCoMoMessage {
   speaker: string
   dia_id: string
   text: string
+  blip_caption?: string | null
+  img_url?: string[] | null
 }
 
 export interface LoCoMoQA {
   question: string
-  answer: string | number
+  answer?: string | number
+  adversarial_answer?: string | number
   evidence: string[]
   category: number
 }

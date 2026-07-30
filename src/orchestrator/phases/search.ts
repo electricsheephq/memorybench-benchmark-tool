@@ -78,6 +78,7 @@ export async function runSearchPhase(
 
         checkpointManager.updatePhase(checkpoint, question.questionId, "search", {
           status: "completed",
+          error: undefined,
           resultFile,
           results,
           completedAt: new Date().toISOString(),

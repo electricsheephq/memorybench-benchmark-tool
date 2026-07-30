@@ -74,6 +74,23 @@ const CATEGORY_TO_TYPE: Record<number, string> = {
   5: "adversarial",
 }
 
+function getGroundTruth(qa: LoCoMoItem["qa"][number], questionId: string): string {
+  const answer = qa.category === 5 ? (qa.adversarial_answer ?? qa.answer) : qa.answer
+  if (answer === undefined || answer === null) {
+    throw new Error(`Missing LoCoMo ground truth for question ${questionId}`)
+  }
+  return String(answer)
+}
+
+function getMessageContent(message: LoCoMoMessage): string {
+  const caption = message.blip_caption?.trim()
+  if (!caption) return message.text
+
+  const imageUrls = (message.img_url || []).map((url) => url.trim()).filter(Boolean)
+  const imageUrlNote = imageUrls.length > 0 ? `; img_url: ${imageUrls.join(", ")}` : ""
+  return `${message.text} [shared image: ${caption}${imageUrlNote}]`
+}
+
 export class LoCoMoBenchmark implements Benchmark {
   name = "locomo"
   private data: LoCoMoItem[] = []
@@ -130,7 +147,7 @@ export class LoCoMoBenchmark implements Benchmark {
           questionId,
           question: qa.question,
           questionType,
-          groundTruth: String(qa.answer),
+          groundTruth: getGroundTruth(qa, questionId),
           haystackSessionIds: sessionIds,
           metadata: {
             sampleId: item.sample_id,
@@ -161,7 +178,7 @@ export class LoCoMoBenchmark implements Benchmark {
 
       const unifiedMessages: UnifiedMessage[] = messages.map((m) => ({
         role: m.speaker === speakerA ? ("user" as const) : ("assistant" as const),
-        content: m.text,
+        content: getMessageContent(m),
         speaker: m.speaker,
       }))
 

@@ -25,4 +25,11 @@ describe("LoCoMo judge category routing", () => {
       expect(getJudgePrompt(questionType)).toBe(DEFAULT_JUDGE_PROMPT)
     }
   )
+
+  test("adversarial prompt credits accurate false-premise corrections", () => {
+    expect(ABSTENTION_JUDGE_PROMPT).toContain("correctly abstains")
+    expect(ABSTENTION_JUDGE_PROMPT).toContain(
+      "accurately identifies the question's false premise and corrects it"
+    )
+  })
 })
