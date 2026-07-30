@@ -31,6 +31,14 @@
     "hermes_provider": {
       "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/providers/hermes-lcm/index.ts",
       "sha256": "b5e542b0e3674566d81225a7eac0fd8564edfb850622fdced8091f6940bb8065"
+    },
+    "locomo_adapter": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/benchmarks/locomo/index.ts",
+      "sha256": "80f4140ca27c985ef7b8a6811a5af76e3dd4aa6396bfc40da7f057e25b5bb00c"
+    },
+    "hermes_bridge": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/providers/hermes-lcm/bridge/hermes_lcm_bridge.py",
+      "sha256": "f25e503addf4bc26bae1b8ae06d371a22205bf2eab30047a481cd776da584bec"
     }
   },
   "env": {
@@ -40,7 +48,8 @@
     "HERMES_MB_CODEX_MODEL": "gpt-5.6-sol",
     "HERMES_MB_CODEX_ANSWER_EFFORT": "medium",
     "HERMES_MB_CODEX_JUDGE_EFFORT": "low",
-    "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1"
+    "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1",
+    "HERMES_MB_ANSWER_READY_CONTENT_CHARS": "2400"
   },
   "amendments": [
     {

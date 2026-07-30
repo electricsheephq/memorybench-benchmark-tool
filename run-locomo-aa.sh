@@ -19,6 +19,7 @@ export HERMES_MB_CODEX_MODEL="gpt-5.6-sol"
 export HERMES_MB_CODEX_ANSWER_EFFORT="medium"
 export HERMES_MB_CODEX_JUDGE_EFFORT="low"
 export HERMES_MB_ANSWER_PRESENTATION="evidence_cards_v1"
+export HERMES_MB_ANSWER_READY_CONTENT_CHARS="2400"
 
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly run_stamp
