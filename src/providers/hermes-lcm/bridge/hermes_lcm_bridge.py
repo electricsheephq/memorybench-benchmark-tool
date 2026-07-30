@@ -145,11 +145,16 @@ def _hydrate_answer_ready_hit(
         return hit
 
     hydrated = dict(hit)
-    # A pre-existing exact_ref encodes the OLD content window; re-hydration
-    # replaces content/offset below, so drop it and let downstream recompute
-    # from the delivered content.
-    hydrated.pop("exact_ref", None)
-    hydrated.pop("exact_ref_source", None)
+    if hit.get("kind") != "summary":
+        # A pre-existing MESSAGE exact_ref encodes the OLD content window;
+        # re-hydration replaces content/offset below, so drop it and let
+        # downstream recompute from the delivered content (store_id present).
+        # Summary hits keep theirs: re-hydration re-reads the SAME node's
+        # summary deterministically, and the summary branch carries only
+        # node_id — no store_id to derive a replacement reference, so dropping
+        # it leaves the evidence-card path referenceless (it throws).
+        hydrated.pop("exact_ref", None)
+        hydrated.pop("exact_ref_source", None)
     content = ""
     match_start = 0
     match_end = 0

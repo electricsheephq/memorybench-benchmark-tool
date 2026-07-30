@@ -76,11 +76,13 @@ describe("LoCoMo fixture ingestion", () => {
     expect(content).not.toContain("https://")
   })
 
-  test("uses adversarial_answer as adversarial ground truth", async () => {
+  test("adversarial-only rows use the canonical abstention gold, never the trap", async () => {
     const benchmark = new LoCoMoBenchmark()
     await benchmark.load({ dataPath: writeFixture() })
 
-    expect(benchmark.getGroundTruth("fixture-q1")).toBe("B made the kite")
+    expect(benchmark.getGroundTruth("fixture-q1")).toBe("Not mentioned in the conversation")
+    // The trap completion must never be presented to the judge as gold.
+    expect(benchmark.getGroundTruth("fixture-q1")).not.toBe("B made the kite")
     expect(benchmark.getGroundTruth("fixture-q1")).not.toBe("undefined")
   })
 

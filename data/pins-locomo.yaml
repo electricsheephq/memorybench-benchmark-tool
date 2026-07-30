@@ -4,6 +4,7 @@
     "harness": {
       "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep",
       "git_sha": "cc3f4bf91069b034fdcdca971b97a5a38be9fae8",
+      "git_sha_note": "SELF-REFERENTIAL: a commit cannot pin its own sha. Finalized by the run-prep explicit re-pin against the exact checkout being executed (amendment protocol, precedent 2026-07-30). The committed value is the prep-time placeholder; pinverify pre-run consumes the re-pinned value.",
       "clean": false
     },
     "product": {

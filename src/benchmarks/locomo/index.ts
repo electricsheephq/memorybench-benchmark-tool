@@ -74,11 +74,19 @@ const CATEGORY_TO_TYPE: Record<number, string> = {
   5: "adversarial",
 }
 
+// The correct category-5 response in the original LoCoMo protocol: the model
+// must recognize the information is absent. The dataset's adversarial_answer
+// is the TRAP completion — presenting it to the judge labeled "Ground Truth
+// Answer" invites crediting exactly the answer the category rejects.
+const ADVERSARIAL_GOLD = "Not mentioned in the conversation"
+
 function getGroundTruth(qa: LoCoMoItem["qa"][number], questionId: string): string {
   // Prefer the explicit answer when a category-5 row carries both fields: the
   // pinned dataset has two such rows where adversarial_answer holds the trap
-  // value ("Yes") and answer holds the evidence-supported truth ("No").
-  const answer = qa.category === 5 ? (qa.answer ?? qa.adversarial_answer) : qa.answer
+  // value ("Yes") and answer holds the evidence-supported truth ("No"). Rows
+  // with only the trap field get the canonical abstention gold — the trap
+  // value never reaches the judge.
+  const answer = qa.category === 5 ? (qa.answer ?? ADVERSARIAL_GOLD) : qa.answer
   if (answer === undefined || answer === null) {
     throw new Error(`Missing LoCoMo ground truth for question ${questionId}`)
   }
