@@ -18,8 +18,9 @@ repo, which this imports rather than reimplements):
 * ``search`` invokes the PRODUCTION ``tools.lcm_recall`` with its opt-in
   ``detail=answer_ready`` contract through a ``SimpleNamespace`` engine with a
   fresh, dataset-disjoint ``current_session_id`` (so the scope prior never
-  silently lifts an evidence session). The bridge forwards product-returned
-  expanded content and never re-follows refs itself.
+  silently lifts an evidence session). The bridge keeps product-returned
+  expanded content and exact-read hydrates any remaining selected hits from the
+  already-open store/DAG; it never performs an additional retrieval search.
 
 Fairness: the bridge only ever sees what the harness hands it (the session
 messages + the query). No dataset-specific logic, no evidence peeking.
@@ -32,6 +33,8 @@ Environment:
     HERMES_MB_WORKDIR              base dir for per-container LCM dbs (required)
     HERMES_MB_PROVIDER            embedding provider: fastembed (default) | voyage
     HERMES_MB_MODEL              embedding model id (default per provider)
+    HERMES_MB_ANSWER_READY_CONTENT_CHARS
+                                  per-result exact-read cap (default 2400)
     LCM_LONGMEMEVAL_FASTEMBED_CACHE  fastembed model cache dir
     VOYAGE_API_KEY               required when HERMES_MB_PROVIDER=voyage
 """
@@ -52,6 +55,7 @@ _DEFAULT_MODELS = {
     "fastembed": "BAAI/bge-small-en-v1.5",
     "voyage": "voyage-context-3",
 }
+_DEFAULT_ANSWER_READY_CONTENT_CHARS = 2_400
 
 # Preserve the real stdout for protocol responses, then redirect stdout to
 # stderr so any library chatter (model downloads, warnings) can never corrupt
@@ -80,6 +84,122 @@ def _question_date(value: Any) -> str | None:
     except ValueError:
         return None
     return normalized
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value
+
+
+def _content_window(
+    content: str,
+    *,
+    match_start: int,
+    match_end: int,
+    char_cap: int,
+) -> dict[str, Any]:
+    """Return a bounded exact-read window with truthful length metadata."""
+    content_chars = len(content)
+    start = min(max(0, match_start), content_chars)
+    end = min(max(start, match_end), content_chars)
+    if content_chars <= char_cap:
+        offset = 0
+    else:
+        midpoint = (start + end) // 2
+        offset = min(max(0, midpoint - char_cap // 2), content_chars - char_cap)
+    bounded = content[offset:offset + char_cap]
+    return {
+        "content": bounded,
+        "content_chars": content_chars,
+        "content_offset": offset,
+        "content_returned_chars": len(bounded),
+        "content_truncated": len(bounded) < content_chars,
+    }
+
+
+def _hydrate_answer_ready_hit(
+    hit: dict[str, Any],
+    *,
+    store: Any,
+    dag: Any,
+    query: str,
+    char_cap: int,
+) -> dict[str, Any]:
+    """Exact-read an answer-ready hit when product hydration is absent/incomplete."""
+    required_metadata = (
+        "content_chars",
+        "content_returned_chars",
+        "content_truncated",
+    )
+    if hit.get("content") is not None and all(
+        hit.get(field) is not None for field in required_metadata
+    ):
+        return hit
+
+    hydrated = dict(hit)
+    if hit.get("kind") != "summary":
+        # A pre-existing MESSAGE exact_ref encodes the OLD content window;
+        # re-hydration replaces content/offset below, so drop it and let
+        # downstream recompute from the delivered content (store_id present).
+        # Summary hits keep theirs: re-hydration re-reads the SAME node's
+        # summary deterministically, and the summary branch carries only
+        # node_id — no store_id to derive a replacement reference, so dropping
+        # it leaves the evidence-card path referenceless (it throws).
+        hydrated.pop("exact_ref", None)
+        hydrated.pop("exact_ref_source", None)
+    content = ""
+    match_start = 0
+    match_end = 0
+
+    if hit.get("kind") == "summary":
+        node_id = hit.get("node_id")
+        node = dag.get_node(int(node_id)) if node_id is not None else None
+        if node is None:
+            raise RuntimeError(
+                f"cannot hydrate answer-ready summary hit without node_id {node_id!r}"
+            )
+        content = str(node.summary or "")
+        match_end = min(len(content), 300)
+        hydrated["content_source"] = "summary"
+        hydrated["source"] = hydrated.get("source") or "summary"
+    else:
+        store_id = hit.get("store_id")
+        stored = store.get(int(store_id)) if store_id is not None else None
+        if stored is None:
+            raise RuntimeError(
+                f"cannot hydrate answer-ready message hit without store_id {store_id!r}"
+            )
+        content = str(stored.get("content") or "")
+        span = hit.get("chunk_span") or {}
+        try:
+            match_start = int(span["char_start"])
+            match_end = int(span["char_end"])
+        except (KeyError, TypeError, ValueError):
+            match_start = content.lower().find(query.lower())
+            if match_start < 0:
+                match_start = 0
+            match_end = match_start + min(max(1, len(query)), 300)
+        hydrated["content_source"] = "message"
+        hydrated["role"] = stored.get("role")
+        hydrated["source"] = stored.get("source") or ""
+
+    hydrated.update(
+        _content_window(
+            content,
+            match_start=match_start,
+            match_end=match_end,
+            char_cap=char_cap,
+        )
+    )
+    return hydrated
 
 
 def _metadata_for_recall_hit(
@@ -163,6 +283,10 @@ class Bridge:
             raise RuntimeError(
                 f"no embedding model for provider {self.provider_name!r}"
             )
+        self.answer_ready_content_chars = _positive_int_env(
+            "HERMES_MB_ANSWER_READY_CONTENT_CHARS",
+            _DEFAULT_ANSWER_READY_CONTENT_CHARS,
+        )
 
         # Make the plugin importable exactly the way the repo's own harness does.
         if str(self.repo_root) not in sys.path:
@@ -404,12 +528,26 @@ class Bridge:
                 raise RuntimeError(f"lcm_recall error: {payload['error']}")
 
             results: list[dict[str, Any]] = []
-            for hit in payload.get("hits", [])[:limit]:
+            bridge_hydrated_count = 0
+            for raw_hit in payload.get("hits", [])[:limit]:
+                hit = _hydrate_answer_ready_hit(
+                    raw_hit,
+                    store=store,
+                    dag=dag,
+                    query=query,
+                    char_cap=self.answer_ready_content_chars,
+                )
+                if (
+                    hit is not raw_hit
+                    and hit.get("content") is not None
+                    and hit.get("content_chars") is not None
+                    and hit.get("content_returned_chars") is not None
+                    and hit.get("content_truncated") is not None
+                ):
+                    bridge_hydrated_count += 1
                 content = hit.get("content") or hit.get("snippet") or ""
-                # Preserve product-owned, mechanically attributable facets for
-                # host-side evidence validation. These values already belong to
-                # the bounded lcm_recall response; the bridge never reopens the
-                # stores to enrich them.
+                # Preserve mechanically attributable product or exact-read
+                # facets for host-side evidence validation.
                 metadata = _metadata_for_recall_hit(hit, dates)
                 results.append({"content": content, "metadata": metadata})
         finally:
@@ -417,10 +555,15 @@ class Bridge:
             dag.close()
             store.close()
 
+        provenance = dict(payload.get("provenance", {}))
+        provenance["bridge_answer_ready"] = {
+            "content_char_cap": self.answer_ready_content_chars,
+            "exact_read_hydrated_count": bridge_hydrated_count,
+        }
         return {
             "ok": True,
             "results": results[:limit],
-            "provenance": payload.get("provenance", {}),
+            "provenance": provenance,
             "degraded": payload.get("degraded", False),
             "degraded_reason": payload.get("degraded_reason"),
         }

@@ -3,7 +3,8 @@
   "worktrees": {
     "harness": {
       "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep",
-      "git_sha": "2c20cee72d65dfc3822831a5f1b158b5da6be180",
+      "git_sha": "cc3f4bf91069b034fdcdca971b97a5a38be9fae8",
+      "git_sha_note": "SELF-REFERENTIAL: a commit cannot pin its own sha. Finalized by the run-prep explicit re-pin against the exact checkout being executed (amendment protocol, precedent 2026-07-30). The committed value is the prep-time placeholder; pinverify pre-run consumes the re-pinned value.",
       "clean": false
     },
     "product": {
@@ -25,11 +26,19 @@
     },
     "judge_prompts": {
       "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/prompts/defaults.ts",
-      "sha256": "ca5b2a04b4eadd9d77fce72d58b5dfa34949e19ed61c01d1beb9ff399595500e"
+      "sha256": "7662f645c689cca78cf442c757ce6ed22e5b1b79dcb7808dd8000c3a9d46855a"
     },
     "hermes_provider": {
       "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/providers/hermes-lcm/index.ts",
       "sha256": "b5e542b0e3674566d81225a7eac0fd8564edfb850622fdced8091f6940bb8065"
+    },
+    "locomo_adapter": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/benchmarks/locomo/index.ts",
+      "sha256": "80f4140ca27c985ef7b8a6811a5af76e3dd4aa6396bfc40da7f057e25b5bb00c"
+    },
+    "hermes_bridge": {
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep/src/providers/hermes-lcm/bridge/hermes_lcm_bridge.py",
+      "sha256": "f25e503addf4bc26bae1b8ae06d371a22205bf2eab30047a481cd776da584bec"
     }
   },
   "env": {
@@ -39,7 +48,8 @@
     "HERMES_MB_CODEX_MODEL": "gpt-5.6-sol",
     "HERMES_MB_CODEX_ANSWER_EFFORT": "medium",
     "HERMES_MB_CODEX_JUDGE_EFFORT": "low",
-    "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1"
+    "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1",
+    "HERMES_MB_ANSWER_READY_CONTENT_CHARS": "2400"
   },
   "amendments": [
     {
@@ -48,6 +58,13 @@
       "old": "1da3f4e0e96028b8a771814293c3033dafd1971f943f6c7e79b0897fe705f590",
       "new": "ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02",
       "reason": "codex CLI auto-upgraded (now 0.146.0) between prep and execution; the prep-time binary no longer exists on disk. Explicit PRE-RUN re-pin, no results existed (section 6e.13: the rule forbids SILENT drift). Both A/A' arms and any later scored LoCoMo run must use this transport or re-pin explicitly again."
+    },
+    {
+      "date": "2026-07-30",
+      "field": "worktrees.harness.git_sha",
+      "old": "2c20cee72d65dfc3822831a5f1b158b5da6be180",
+      "new": "cc3f4bf91069b034fdcdca971b97a5a38be9fae8",
+      "reason": "The transport re-pin commit necessarily moved the harness HEAD (self-referential pin). Delta between the two shas is the pin amendment itself, nothing else. Left uncommitted during the run (harness pin already accepts clean=false); committed with the run record afterward."
     }
   ]
 }
