@@ -5,14 +5,14 @@ readonly REPO="/Volumes/LEXAR/hermes-work/wt-locomo-prep"
 readonly TOOLS="/Volumes/LEXAR/hermes-work/wt-ci-fix/bench/tools"
 readonly PINS="$REPO/data/pins-locomo.yaml"
 readonly SOURCE_DATASET="$REPO/data/locomo10.json"
-readonly LOG_ROOT="/Volumes/LEXAR/Codex/session-notes/2026-07-29/hermes-r3-1/artifacts/laneLOCOMO-logs"
+readonly LOG_ROOT="/Volumes/LEXAR/Codex/session-notes/2026-07-31/hermes-locomo-declared/artifacts"
 
 if [[ "${1:-}" != "--execute-paid-aa" || "${LOCOMO_PAID_RUN_AUTHORIZED:-0}" != "1" ]]; then
   echo "Paid A/A' recipe only. Requires --execute-paid-aa and LOCOMO_PAID_RUN_AUTHORIZED=1." >&2
   exit 64
 fi
 
-export HERMES_LCM_REPO="/Volumes/LEXAR/hermes-work/hermes-lcm"
+export HERMES_LCM_REPO="/Volumes/LEXAR/hermes-work/wt-locomo-product"
 export HERMES_MB_PROVIDER="fastembed"
 export HERMES_MB_LLM_CLI="codex"
 export HERMES_MB_CODEX_MODEL="gpt-5.6-sol"
@@ -20,6 +20,8 @@ export HERMES_MB_CODEX_ANSWER_EFFORT="medium"
 export HERMES_MB_CODEX_JUDGE_EFFORT="low"
 export HERMES_MB_ANSWER_PRESENTATION="evidence_cards_v1"
 export HERMES_MB_ANSWER_READY_CONTENT_CHARS="2400"
+export HERMES_MB_FUSION="quota:fts=1,chunk=2"
+export LCM_CHUNK_MIN_CONVERSATIONAL_TOKENS="10"
 
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly run_stamp

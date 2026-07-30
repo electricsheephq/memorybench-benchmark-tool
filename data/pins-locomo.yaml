@@ -3,13 +3,13 @@
   "worktrees": {
     "harness": {
       "path": "/Volumes/LEXAR/hermes-work/wt-locomo-prep",
-      "git_sha": "cc3f4bf91069b034fdcdca971b97a5a38be9fae8",
+      "git_sha": "f55eba33e215a9ba72fe5195cad9b7c69a7b9e57",
       "git_sha_note": "SELF-REFERENTIAL: a commit cannot pin its own sha. Finalized by the run-prep explicit re-pin against the exact checkout being executed (amendment protocol, precedent 2026-07-30). The committed value is the prep-time placeholder; pinverify pre-run consumes the re-pinned value.",
       "clean": false
     },
     "product": {
-      "path": "/Volumes/LEXAR/hermes-work/hermes-lcm",
-      "git_sha": "543e9ea061bb355505cbb9497d26974e440ad9cf",
+      "path": "/Volumes/LEXAR/hermes-work/wt-locomo-product",
+      "git_sha": "9d181aa45dc60a5f746fcd797a07823650a86ab5",
       "clean": true
     }
   },
@@ -49,7 +49,9 @@
     "HERMES_MB_CODEX_ANSWER_EFFORT": "medium",
     "HERMES_MB_CODEX_JUDGE_EFFORT": "low",
     "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1",
-    "HERMES_MB_ANSWER_READY_CONTENT_CHARS": "2400"
+    "HERMES_MB_ANSWER_READY_CONTENT_CHARS": "2400",
+    "HERMES_MB_FUSION": "quota:fts=1,chunk=2",
+    "LCM_CHUNK_MIN_CONVERSATIONAL_TOKENS": "10"
   },
   "amendments": [
     {
