@@ -121,6 +121,13 @@ def _parse_fusion_mode(raw: str | None = None) -> tuple[int, int, int] | None:
     q_fts = int(match.group(1))
     q_chunk = int(match.group(2))
     floor_fts = int(match.group(3) or 0)
+    if q_fts == 0 and q_chunk == 0 and floor_fts == 0:
+        # All-zero pulls would return empty retrieval under ok=true — a
+        # nonsensical declared config must fail closed, not look successful.
+        raise RuntimeError(
+            "HERMES_MB_FUSION quota requires at least one non-zero pull "
+            "(fts, chunk, or floor)"
+        )
     return q_fts, q_chunk, floor_fts
 
 
@@ -348,6 +355,7 @@ def _metadata_for_recall_hit(
         "content_offset",
         "content_returned_chars",
         "expand_hint",
+        "fusion_mode",
     ):
         if hit.get(facet) is not None:
             metadata[facet] = hit.get(facet)
@@ -647,12 +655,18 @@ class Bridge:
             )
             engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
 
+            # Stay under the TS handle's 180 s REQUEST_TIMEOUT_MS: a bridge
+            # deadline beyond the caller timeout means the caller kills the
+            # handle while the bridge still grinds and the answer is lost.
+            deadline_s = float(
+                os.environ.get("HERMES_MB_QUOTA_SEARCH_DEADLINE_S", "170")
+            )
             arms = _collect_quota_arms(
                 engine,
                 query,
                 self.embedder,
                 lcm_tools=lcm_tools,
-                deadline=time.monotonic() + 300.0,
+                deadline=time.monotonic() + deadline_s,
             )
             selected = quota_merge(
                 arms["fts"],
@@ -669,6 +683,10 @@ class Bridge:
                 raw_hit = dict(selected_entry["hit"])
                 raw_hit["arms"] = selected_entry["arm"]
                 raw_hit["arm_rank"] = selected_entry["arm_rank"]
+                # The TS normalizer persists only per-hit results; the quota
+                # parameters must survive into checkpoints, so each hit
+                # carries the fusion mode.
+                raw_hit["fusion_mode"] = fusion_mode
                 hit = _hydrate_answer_ready_hit(
                     raw_hit,
                     store=store,

@@ -321,3 +321,30 @@ def test_search_malformed_fusion_fails_before_opening_store(monkeypatch: pytest.
     with pytest.raises(RuntimeError, match="HERMES_MB_FUSION"):
         instance.search({"containerTag": "fixture", "query": "bad", "limit": 3})
     assert opened is False
+
+
+def test_parse_rejects_all_zero_pulls():
+    import pytest as _pytest
+    from hermes_lcm_bridge import _parse_fusion_mode
+
+    with _pytest.raises(RuntimeError, match="non-zero pull"):
+        _parse_fusion_mode("quota:fts=0,chunk=0")
+    with _pytest.raises(RuntimeError, match="non-zero pull"):
+        _parse_fusion_mode("quota:fts=0,chunk=0,floor=0")
+    # A non-zero floor alone is an explicit, valid (if odd) declared config.
+    assert _parse_fusion_mode("quota:fts=0,chunk=0,floor=5") == (0, 0, 5)
+
+
+def test_metadata_carries_fusion_mode():
+    from hermes_lcm_bridge import _metadata_for_recall_hit
+
+    hit = {
+        "kind": "message",
+        "store_id": 7,
+        "session_id": "s1",
+        "fusion_mode": "quota:fts=1,chunk=2,floor=0",
+        "arm_rank": 3,
+    }
+    metadata = _metadata_for_recall_hit(hit, {}, include_arm_rank=True)
+    assert metadata["fusion_mode"] == "quota:fts=1,chunk=2,floor=0"
+    assert metadata["arm_rank"] == 3
