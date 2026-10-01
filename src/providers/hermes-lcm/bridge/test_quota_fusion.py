@@ -109,12 +109,17 @@ def test_collect_quota_arms_matches_replay_candidate_queries() -> None:
     tools = types.SimpleNamespace()
 
     def fts_arm(
-        engine: object, query: str, *, candidate_limit: int, deadline: float
+        engine: object, query: str, *, candidate_limit: int, deadline: float,
+        excluded_session_ids: set[str],
     ) -> tuple[list[dict[str, object]], None]:
+        assert excluded_session_ids == set()
         calls.append(("fts", (engine, query, candidate_limit, deadline)))
         return [{"store_id": 1}], None
 
-    def embed_query(provider: object, query: str, *, remaining_s: float) -> list[float]:
+    def embed_query(
+        provider: object, query: str, *, remaining_s: float, engine: object, task: str
+    ) -> list[float]:
+        assert engine == "engine" and task == "chunk"
         calls.append(("embed", (provider, query, remaining_s)))
         return [0.25, 0.5]
 
@@ -125,7 +130,9 @@ def test_collect_quota_arms_matches_replay_candidate_queries() -> None:
         provider: object,
         candidate_limit: int,
         deadline: float,
+        candidate_session_ids: list[str] | None,
     ) -> tuple[list[dict[str, object]], str]:
+        assert candidate_session_ids is None
         calls.append(("chunk", (engine, query_vector, provider, candidate_limit, deadline)))
         return [{"store_id": 2}], "full"
 
@@ -200,6 +207,8 @@ def install_fake_hermes_modules(monkeypatch: pytest.MonkeyPatch, tools: types.Mo
 def fixture_bridge(monkeypatch: pytest.MonkeyPatch) -> bridge.Bridge:
     instance = bridge.Bridge.__new__(bridge.Bridge)
     instance.embedder = _FakeEmbedder()
+    instance.embeddings_enabled = True
+    instance._initialized = True
     instance.provider_name = "fastembed"
     instance.workdir = Path("/fixture-workdir")
     instance.answer_ready_content_chars = 2400
