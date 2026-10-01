@@ -52,12 +52,37 @@ def record(message):
     print(line, file=sys.stderr, flush=True)
 
 
+def cpu_seconds(text):
+    # ps TIME: macOS "m:ss.xx" / "h:mm:ss.xx", procps "[d-]hh:mm:ss".
+    days, _, clock = text.rpartition("-")
+    total = 0.0
+    for part in clock.split(":"):
+        total = total * 60 + float(part)
+    return total + (int(days) * 86400 if days else 0)
+
+
+def group_snapshot(pgid):
+    """(live members, summed CPU seconds) of one process group; zombies are not live."""
+    out = subprocess.run(["ps", "-A", "-o", "pgid=,stat=,time="],
+                         capture_output=True, text=True, timeout=5, check=True).stdout
+    live, cpu = 0, 0.0
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == str(pgid) and not fields[1].startswith("Z"):
+            live += 1
+            cpu += cpu_seconds(fields[2])
+    return live, cpu
+
+
 def group_exists(pgid):
     try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
+        return group_snapshot(pgid)[0] > 0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        try:  # Fall back to the signal probe (counts zombies) rather than assume the group is gone.
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
 
 
 def stop_group(proc):
@@ -96,26 +121,27 @@ for attempt in range(max_resumes + 1):
             record(f"START attempt={attempt} pgid={proc.pid}")
             size, last_growth = log_path.stat().st_size, time.monotonic()
             stalled = False
+            samples = []  # (monotonic, group CPU seconds) over the last stall window
             while proc.poll() is None:
                 time.sleep(poll_s)
+                now = time.monotonic()
                 current = log_path.stat().st_size
                 if current != size:
-                    size, last_growth = current, time.monotonic()
-                if time.monotonic() - last_growth < stall_s or proc.poll() is not None:
-                    continue
+                    size, last_growth = current, now
                 try:
-                    cpu_result = subprocess.run(["ps", "-o", "%cpu=", "-p", str(proc.pid)],
-                                                capture_output=True, text=True, timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
+                    samples.append((now, group_snapshot(proc.pid)[1]))
+                except (OSError, ValueError, subprocess.SubprocessError):
                     record(f"CPU unavailable pgid={proc.pid}; observe")
                     continue
-                try:
-                    cpu = float(cpu_result.stdout.strip())
-                except ValueError:
-                    record(f"CPU unavailable pgid={proc.pid}; observe")
+                while len(samples) > 1 and now - samples[1][0] >= stall_s:
+                    samples.pop(0)
+                if now - last_growth < stall_s or now - samples[0][0] < stall_s or proc.poll() is not None:
                     continue
-                if cpu_result.returncode == 0 and cpu < 1.0:
-                    record(f"STALL pgid={proc.pid} cpu={cpu:.2f} idle_s={time.monotonic() - last_growth:.2f}")
+                # Recent group CPU, not a lifetime average: a process that worked hard and then
+                # deadlocked reads near 0 here once a full quiet window has passed.
+                cpu = 100.0 * (samples[-1][1] - samples[0][1]) / (now - samples[0][0])
+                if cpu < 1.0:
+                    record(f"STALL pgid={proc.pid} cpu={cpu:.2f} idle_s={now - last_growth:.2f}")
                     stalled = True
                     break
         finally:

@@ -496,6 +496,31 @@ class Bridge:
         # surfaced onto each search hit's metadata for temporal questions.
         return self.workdir / f"{_safe(container_tag)}.dates.json"
 
+    def _ingested_path(self, container_tag: str) -> Path:
+        # session_id -> store ids, written only after a session is fully ingested.
+        return self.workdir / f"{_safe(container_tag)}.ingested.json"
+
+    def _load_ingested(self, container_tag: str) -> dict[str, list[int]]:
+        path = self._ingested_path(container_tag)
+        if not path.exists():
+            return {}
+        # An unreadable record must stop the run: treating it as empty would
+        # re-ingest every session and store each one twice.
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _session_has_rows(db_path: Path, session_id: str) -> bool:
+        import sqlite3
+
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1", (session_id,)
+            ).fetchone()
+        finally:
+            connection.close()
+        return row is not None
+
     def _load_dates(self, container_tag: str) -> dict[str, Any]:
         path = self._dates_path(container_tag)
         if path.exists():
@@ -532,6 +557,17 @@ class Bridge:
             }
             for m in session.get("messages", [])
         ]
+        # A watchdog resume re-sends every session the orchestrator had not yet
+        # recorded. A session this container already holds in full is skipped; a
+        # session cut off mid-ingest (rows stored, no completion record) stops the
+        # run instead of being stored twice.
+        ingested = self._load_ingested(container_tag)
+        if session_id in ingested:
+            return {
+                "ok": True,
+                "documentIds": [str(sid) for sid in ingested[session_id]] or [session_id],
+                "resumed": True,
+            }
 
         from hermes_lcm.chunking import iter_message_chunks
         from hermes_lcm.dag import SummaryDAG, SummaryNode
@@ -565,6 +601,11 @@ class Bridge:
                 )
 
             store_ids: list[int] = []
+            if self._session_has_rows(db_path, session_id):
+                raise RuntimeError(
+                    f"session {session_id} is partly stored in container {container_tag} "
+                    "by an interrupted ingest; rebuild this container's store before resuming"
+                )
             if messages:
                 store_ids = store.append_batch(
                     session_id, messages, source="benchmark", conversation_id=session_id
@@ -594,7 +635,7 @@ class Bridge:
                         )
 
             summary_text = self._deterministic_session_summary(messages)
-            order = self._order.get(container_tag, 0) + 1
+            order = self._order.get(container_tag, len(ingested)) + 1
             self._order[container_tag] = order
             node_id = dag.add_node(
                 SummaryNode(
@@ -623,6 +664,12 @@ class Bridge:
             self._dates_path(container_tag).write_text(
                 json.dumps(dates), encoding="utf-8"
             )
+
+        ingested[session_id] = store_ids
+        marker = self._ingested_path(container_tag)
+        partial = marker.with_suffix(".tmp")
+        partial.write_text(json.dumps(ingested), encoding="utf-8")
+        os.replace(partial, marker)
 
         return {
             "ok": True,

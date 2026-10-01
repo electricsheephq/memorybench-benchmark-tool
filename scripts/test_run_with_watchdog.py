@@ -38,12 +38,29 @@ print("checkpoint resumed", flush=True)
 '''
 
 
+FAKE_PS = """#!PYTHON
+import os, subprocess, sys
+from pathlib import Path
+mode = os.environ.get("FAKE_CPU", "")
+if mode == "unavailable":
+    sys.exit(1)
+out = subprocess.run(["/bin/ps", *sys.argv[1:]], capture_output=True, text=True).stdout
+if mode == "busy":
+    counter = Path(os.environ["FAKE_ROOT"]) / "ps-calls"
+    calls = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(calls))
+    out = "".join(" ".join(line.split()[:2] + [f"0:{calls * 10}.00"]) + "\\n" for line in out.splitlines())
+sys.stdout.write(out)
+"""
+
+
 def env_for(tmp_path):
-    # The restricted host denies ps; isolate CPU gating from real group cleanup.
+    # Real process-group state from /bin/ps; FAKE_CPU=busy makes the group's CPU time climb on
+    # every call (recent work), FAKE_CPU=unavailable makes ps fail.
     tools = tmp_path / "tools"
     tools.mkdir(exist_ok=True)
     ps = tools / "ps"
-    ps.write_text(f"#!{sys.executable}\nimport os; print(os.environ.get('FAKE_CPU', '0.0'))\n")
+    ps.write_text(FAKE_PS.replace("PYTHON", sys.executable))
     ps.chmod(0o755)
     return {
         **os.environ,
@@ -157,7 +174,20 @@ def test_normal_exit_cleans_leftover_child(tmp_path):
     assert wait_gone(child)
 
 
-@pytest.mark.parametrize("cpu", ["5.0", "unavailable"])
+def test_work_then_deadlock_is_a_stall(tmp_path):
+    # CPU time spent before the hang must not mask it (no lifetime average).
+    command = [str(WATCHDOG), "fake-run", "--", sys.executable, "-c",
+               "import time\nend=time.monotonic()+1.5\nwhile time.monotonic()<end: pass\ntime.sleep(120)",
+               "-r", "fake-run"]
+    env = env_for(tmp_path)
+    env.update(STALL_MIN="0.02", MAX_RESUMES="0")
+    result = subprocess.run(command, env=env, capture_output=True, text=True, check=False, timeout=20)
+    actions = (tmp_path / "run.log.watchdog.log").read_text()
+    assert "STALL" in actions and "EXHAUSTED" in actions
+    assert result.returncode == 124
+
+
+@pytest.mark.parametrize("cpu", ["busy", "unavailable"])
 def test_high_or_unavailable_cpu_without_log_growth_is_observed(tmp_path, cpu):
     command = [str(WATCHDOG), "fake-run", "--", sys.executable, "-c",
                "import time; time.sleep(2)", "-r", "fake-run"]

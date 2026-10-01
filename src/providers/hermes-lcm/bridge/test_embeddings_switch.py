@@ -232,3 +232,52 @@ def test_product_positive_control(make_bridge, monkeypatch, tmp_path):
     evidence = os.environ.get("HERMES_MB_CONTROL_RECEIPT")
     if evidence:
         Path(evidence).write_text(json.dumps(receipts, indent=2) + "\n")
+
+
+def test_resume_skips_a_session_already_ingested(make_bridge, tmp_path):
+    instance = make_bridge("off")
+    instance.initialize({})
+    instance._ingested_path("resume").write_text(json.dumps({"s1": [4, 5, 6]}), encoding="utf-8")
+    reply = instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
+    assert reply == {"ok": True, "documentIds": ["4", "5", "6"], "resumed": True}
+    assert not instance._db_path("resume").exists()
+
+
+def test_unreadable_completion_record_stops_the_run(make_bridge):
+    instance = make_bridge("off")
+    instance.initialize({})
+    instance._ingested_path("resume").write_text("{not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
+
+
+@pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
+def test_resumed_ingest_never_stores_a_session_twice(make_bridge, monkeypatch):
+    session, _queries = _short_conversation()
+
+    def message_rows(db):
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        finally:
+            connection.close()
+
+    first = make_bridge("off")
+    monkeypatch.setattr(first, "_resolve_harness_provider", forbidden)
+    first.initialize({})
+    stored = first.ingest({"containerTag": "resume", "session": session})
+    db = first._db_path("resume")
+    rows = message_rows(db)
+    assert rows == len(session["messages"])
+    # A watchdog resume starts a new bridge process that re-sends the session.
+    second = make_bridge("off")
+    monkeypatch.setattr(second, "_resolve_harness_provider", forbidden)
+    second.initialize({})
+    again = second.ingest({"containerTag": "resume", "session": session})
+    assert again["resumed"] is True and again["documentIds"] == stored["documentIds"]
+    assert message_rows(db) == rows
+    # Rows stored but no completion record: an ingest cut off mid-way stops the run.
+    second._ingested_path("resume").unlink()
+    with pytest.raises(RuntimeError, match="partly stored"):
+        second.ingest({"containerTag": "resume", "session": session})
+    assert message_rows(db) == rows
