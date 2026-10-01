@@ -281,3 +281,13 @@ def test_resumed_ingest_never_stores_a_session_twice(make_bridge, monkeypatch):
     with pytest.raises(RuntimeError, match="partly stored"):
         second.ingest({"containerTag": "resume", "session": session})
     assert message_rows(db) == rows
+
+
+def test_clear_removes_the_ingest_record(make_bridge):
+    instance = make_bridge("off")
+    instance.initialize({})
+    record = instance._ingested_path("resume")
+    record.write_text(json.dumps({"s1": [1]}), encoding="utf-8")
+    record.with_suffix(".tmp").write_text("{}", encoding="utf-8")
+    assert instance.clear({"containerTag": "resume"}) == {"ok": True}
+    assert not record.exists() and not record.with_suffix(".tmp").exists()

@@ -45,11 +45,12 @@ mode = os.environ.get("FAKE_CPU", "")
 if mode == "unavailable":
     sys.exit(1)
 out = subprocess.run(["/bin/ps", *sys.argv[1:]], capture_output=True, text=True).stdout
-if mode == "busy":
+if mode in ("busy", "shrink"):
     counter = Path(os.environ["FAKE_ROOT"]) / "ps-calls"
     calls = int(counter.read_text()) + 1 if counter.exists() else 1
     counter.write_text(str(calls))
-    out = "".join(" ".join(line.split()[:2] + [f"0:{calls * 10}.00"]) + "\\n" for line in out.splitlines())
+    seconds = calls * 10 if mode == "busy" else max(0, 10000 - calls * 10)
+    out = "".join(" ".join(line.split()[:3] + [f"0:{seconds}.00"]) + "\\n" for line in out.splitlines())
 sys.stdout.write(out)
 """
 
@@ -80,7 +81,9 @@ def gone(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    return False
+    # An unreaped zombie (a PID 1 that does not reap) holds nothing; count it as gone.
+    state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return state.startswith("Z")
 
 
 def wait_gone(pid):
@@ -185,6 +188,18 @@ def test_work_then_deadlock_is_a_stall(tmp_path):
     actions = (tmp_path / "run.log.watchdog.log").read_text()
     assert "STALL" in actions and "EXHAUSTED" in actions
     assert result.returncode == 124
+
+
+def test_a_shrinking_cpu_sum_is_not_a_stall(tmp_path):
+    # A member that exits takes its CPU time out of the group sum; that must restart the
+    # window, not read as a negative (idle) rate.
+    command = [str(WATCHDOG), "fake-run", "--", sys.executable, "-c", "import time; time.sleep(2)", "-r", "fake-run"]
+    env = env_for(tmp_path)
+    env.update(FAKE_CPU="shrink", STALL_MIN="0.01")
+    result = subprocess.run(command, env=env, capture_output=True, text=True, check=False, timeout=10)
+    assert result.returncode == 0
+    actions = (tmp_path / "run.log.watchdog.log").read_text()
+    assert "STALL" not in actions and "RESUME" not in actions
 
 
 @pytest.mark.parametrize("cpu", ["busy", "unavailable"])

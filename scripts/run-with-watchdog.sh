@@ -62,16 +62,17 @@ def cpu_seconds(text):
 
 
 def group_snapshot(pgid):
-    """(live members, summed CPU seconds) of one process group; zombies are not live."""
-    out = subprocess.run(["ps", "-A", "-o", "pgid=,stat=,time="],
+    """(live members, summed CPU seconds, live pids) of one process group; zombies are not live."""
+    out = subprocess.run(["ps", "-A", "-o", "pgid=,pid=,stat=,time="],
                          capture_output=True, text=True, timeout=5, check=True).stdout
-    live, cpu = 0, 0.0
+    live, cpu, pids = 0, 0.0, []
     for line in out.splitlines():
         fields = line.split()
-        if len(fields) == 3 and fields[0] == str(pgid) and not fields[1].startswith("Z"):
+        if len(fields) == 4 and fields[0] == str(pgid) and not fields[2].startswith("Z"):
             live += 1
-            cpu += cpu_seconds(fields[2])
-    return live, cpu
+            cpu += cpu_seconds(fields[3])
+            pids.append(fields[1])
+    return live, cpu, frozenset(pids)
 
 
 def group_exists(pgid):
@@ -121,7 +122,7 @@ for attempt in range(max_resumes + 1):
             record(f"START attempt={attempt} pgid={proc.pid}")
             size, last_growth = log_path.stat().st_size, time.monotonic()
             stalled = False
-            samples = []  # (monotonic, group CPU seconds) over the last stall window
+            samples = []  # (monotonic, group CPU seconds, live pids) over the last stall window
             while proc.poll() is None:
                 time.sleep(poll_s)
                 now = time.monotonic()
@@ -129,10 +130,15 @@ for attempt in range(max_resumes + 1):
                 if current != size:
                     size, last_growth = current, now
                 try:
-                    samples.append((now, group_snapshot(proc.pid)[1]))
+                    _live, cpu_now, pids = group_snapshot(proc.pid)
                 except (OSError, ValueError, subprocess.SubprocessError):
                     record(f"CPU unavailable pgid={proc.pid}; observe")
                     continue
+                # A member that exits takes its CPU time out of the sum; restart the window
+                # whenever membership changes so a shrinking sum never reads as idle.
+                if samples and (pids != samples[-1][2] or cpu_now < samples[-1][1]):
+                    samples = []
+                samples.append((now, cpu_now, pids))
                 while len(samples) > 1 and now - samples[1][0] >= stall_s:
                     samples.pop(0)
                 if now - last_growth < stall_s or now - samples[0][0] < stall_s or proc.poll() is not None:

@@ -1509,6 +1509,12 @@ class Bridge:
 
     def clear(self, req: dict[str, Any]) -> dict[str, Any]:
         container_tag = str(req["containerTag"])
+        # The ingest record goes first: a clear cut off part-way then leaves rows
+        # without a record, which the next ingest refuses instead of trusting.
+        record = self._ingested_path(container_tag)
+        for path in (record, record.with_suffix(".tmp")):
+            if path.exists():
+                path.unlink()
         db_path = self._db_path(container_tag)
         for suffix in ("", "-wal", "-shm"):
             candidate = Path(str(db_path) + suffix)
