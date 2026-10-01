@@ -31,7 +31,8 @@ The hermes-lcm plugin repo is NEVER modified: it is made importable via the same
 Environment:
     HERMES_LCM_REPO                path to the hermes-lcm checkout (required)
     HERMES_MB_WORKDIR              base dir for per-container LCM dbs (required)
-    HERMES_MB_PROVIDER            embedding provider: fastembed (default) | voyage
+    HERMES_MB_PROVIDER            embedding provider: fastembed (default) | voyage | stub
+    HERMES_MB_EMBEDDINGS          on (default) | off (full-text recall)
     HERMES_MB_MODEL              embedding model id (default per provider)
     HERMES_MB_ANSWER_READY_CONTENT_CHARS
                                   per-result exact-read cap (default 2400)
@@ -53,6 +54,7 @@ from types import SimpleNamespace
 from typing import Any
 
 _DEFAULT_MODELS = {
+    "stub": "stub-hash-64",
     "fastembed": "BAAI/bge-small-en-v1.5",
     "voyage": "voyage-context-3",
 }
@@ -208,13 +210,16 @@ def _collect_quota_arms(
 ) -> dict[str, list[dict[str, Any]]]:
     """Run the replay's raw FTS and chunk-KNN arms, 200 candidates each."""
     fts_hits, fts_error = lcm_tools._lcm_recall_fts_arm(
-        engine, query, candidate_limit=200, deadline=deadline
+        engine, query, candidate_limit=200, deadline=deadline,
+        excluded_session_ids=set(),
     )
     if fts_error is not None:
         raise RuntimeError(f"FTS arm failed: {fts_error}")
     query_vector = lcm_tools._lcm_grep_embed_query(
         provider,
         query,
+        engine=engine,
+        task="chunk",
         remaining_s=max(1.0, deadline - time.monotonic()),
     )
     chunk_result = lcm_tools._lcm_recall_chunk_arm(
@@ -223,6 +228,7 @@ def _collect_quota_arms(
         provider=provider,
         candidate_limit=200,
         deadline=deadline,
+        candidate_session_ids=None,
     )
     return {"fts": list(fts_hits), "chunk": list(chunk_result[0])}
 
@@ -402,6 +408,12 @@ class Bridge:
         self.workdir = Path(workdir).resolve()
         self.workdir.mkdir(parents=True, exist_ok=True)
 
+        embeddings = os.environ.get("HERMES_MB_EMBEDDINGS", "on")
+        if embeddings not in {"on", "off"}:
+            raise RuntimeError("HERMES_MB_EMBEDDINGS must be on or off")
+        self.embeddings_enabled = embeddings == "on"
+        self._initialized = False
+
         self.provider_name = (
             (os.environ.get("HERMES_MB_PROVIDER") or "fastembed").strip().lower()
         )
@@ -441,11 +453,15 @@ class Bridge:
     # -- lifecycle ------------------------------------------------------------
 
     def initialize(self, _req: dict[str, Any]) -> dict[str, Any]:
-        if self.provider_name == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
-            raise RuntimeError("HERMES_MB_PROVIDER=voyage but VOYAGE_API_KEY is unset")
+        if not self.embeddings_enabled and os.environ.get("HERMES_MB_FUSION"):
+            raise RuntimeError(
+                "HERMES_MB_EMBEDDINGS=off requires empty HERMES_MB_FUSION; "
+                "quota fusion needs chunk vectors"
+            )
         # Warm the embedder once so the model download/load happens here, not
         # inside a per-question path, and .dim is populated.
         self._ensure_embedder()
+        self._initialized = True
         _log(
             f"initialized provider={self.provider_name} model={self.model} dim={self.dim} "
             f"workdir={self.workdir}"
@@ -455,11 +471,11 @@ class Bridge:
             "provider": self.provider_name,
             "model": self.model,
             "dim": self.dim,
-            "embeddings_enabled": True,
+            "embeddings_enabled": self.embeddings_enabled,
         }
 
     def _ensure_embedder(self) -> None:
-        if self.embedder is not None:
+        if not self.embeddings_enabled or self.embedder is not None:
             return
         if self.provider_name == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
             raise RuntimeError("HERMES_MB_PROVIDER=voyage but VOYAGE_API_KEY is unset")
@@ -494,7 +510,7 @@ class Bridge:
 
         return LCMConfig(
             database_path=str(db_path),
-            embeddings_enabled=True,
+            embeddings_enabled=self.embeddings_enabled,
             embedding_provider=self.provider_name,
             embedding_model=self.model,
         )
@@ -502,7 +518,7 @@ class Bridge:
     # -- ingest ---------------------------------------------------------------
 
     def ingest(self, req: dict[str, Any]) -> dict[str, Any]:
-        if self.embedder is None:
+        if not self._initialized:
             raise RuntimeError("ingest before initialize")
         container_tag = str(req["containerTag"])
         session = req["session"]
@@ -530,22 +546,23 @@ class Bridge:
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)
         try:
-            vector_store.register_profile(self.model, self.provider_name, self.dim)
-            identity = vector_store.capture_identity(
-                self.model, provider=self.provider_name
-            )
-            vector_store.register_profile(
-                self.model, self.provider_name, self.dim, task="chunk"
-            )
-            chunk_identity = EmbeddingIdentity.canonical(
-                self.provider_name,
-                self.model,
-                "",
-                self.dim,
-                "float32",
-                "little",
-                "chunk",
-            )
+            if self.embeddings_enabled:
+                vector_store.register_profile(self.model, self.provider_name, self.dim)
+                identity = vector_store.capture_identity(
+                    self.model, provider=self.provider_name
+                )
+                vector_store.register_profile(
+                    self.model, self.provider_name, self.dim, task="chunk"
+                )
+                chunk_identity = EmbeddingIdentity.canonical(
+                    self.provider_name,
+                    self.model,
+                    "",
+                    self.dim,
+                    "float32",
+                    "little",
+                    "chunk",
+                )
 
             store_ids: list[int] = []
             if messages:
@@ -561,7 +578,7 @@ class Bridge:
                 for chunk in iter_message_chunks(rows, policy="conversational"):
                     chunk_texts.append(chunk.text)
                     chunk_meta.append(chunk)
-                if chunk_texts:
+                if chunk_texts and self.embeddings_enabled:
                     chunk_vectors = self.embedder.embed_documents(chunk_texts)
                     for chunk, vector in zip(chunk_meta, chunk_vectors):
                         vector_store.record_chunk_embedding(
@@ -590,10 +607,11 @@ class Bridge:
                     created_at=float(order),
                 )
             )
-            summary_vector = self.embedder.embed_documents([summary_text])[0]
-            vector_store.record_embedding(
-                str(node_id), "summary", self.model, summary_vector, identity=identity
-            )
+            if self.embeddings_enabled:
+                summary_vector = self.embedder.embed_documents([summary_text])[0]
+                vector_store.record_embedding(
+                    str(node_id), "summary", self.model, summary_vector, identity=identity
+                )
         finally:
             vector_store.close()
             dag.close()
@@ -732,7 +750,7 @@ class Bridge:
         }
 
     def search(self, req: dict[str, Any]) -> dict[str, Any]:
-        if self.embedder is None:
+        if not self._initialized:
             raise RuntimeError("search before initialize")
         container_tag = str(req["containerTag"])
         query = str(req.get("query", ""))
@@ -765,11 +783,12 @@ class Bridge:
                 _hermes_home=str(self.workdir),
                 current_session_id=fresh_session,
             )
-            cache_key = (
-                self.provider_name.strip().lower(),
-                str(self.embedder.model_id).strip(),
-            )
-            engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
+            if self.embeddings_enabled:
+                cache_key = (
+                    self.provider_name.strip().lower(),
+                    str(self.embedder.model_id).strip(),
+                )
+                engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
 
             payload = json.loads(
                 lcm_tools.lcm_recall(
@@ -949,11 +968,12 @@ class Bridge:
 
             def _retrieve(args: dict[str, Any]) -> str:
                 self._ensure_embedder()
-                cache_key = (
-                    self.provider_name.strip().lower(),
-                    str(self.embedder.model_id).strip(),
-                )
-                engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
+                if self.embeddings_enabled:
+                    cache_key = (
+                        self.provider_name.strip().lower(),
+                        str(self.embedder.model_id).strip(),
+                    )
+                    engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
                 return lcm_tools.lcm_recall(args, engine=engine)
 
             trace = build_preanswer_evidence(
@@ -1087,7 +1107,7 @@ class Bridge:
                 self._ensure_embedder()
                 cache_key = (
                     self.provider_name.strip().lower(),
-                    str(self.embedder.model_id).strip(),
+                    str(self.model).strip(),
                 )
                 engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
                 return lcm_tools.lcm_recall(args, engine=engine)
@@ -1283,7 +1303,7 @@ class Bridge:
                 self._ensure_embedder()
                 cache_key = (
                     self.provider_name.strip().lower(),
-                    str(self.embedder.model_id).strip(),
+                    str(self.model).strip(),
                 )
                 engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
                 return lcm_tools.lcm_recall(args, engine=engine)
