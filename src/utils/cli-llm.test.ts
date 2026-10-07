@@ -121,6 +121,9 @@ describe("isolated CLI completion", () => {
       SUPABASE_URL: "secret-url",
       HERMES_MB_LLM_CLI: "codex",
       CUSTOM_SECRET: "secret-custom",
+      OPENAI_BASE_URL: "https://endpoint.invalid/v1",
+      OPENAI_API_BASE: "https://endpoint.invalid/v1",
+      AZURE_OPENAI_ENDPOINT: "https://endpoint.invalid",
     })
     expect(env).toMatchObject({
       PATH: "/bin",
@@ -134,6 +137,9 @@ describe("isolated CLI completion", () => {
     expect(env.SUPABASE_URL).toBeUndefined()
     expect(env.HERMES_MB_LLM_CLI).toBeUndefined()
     expect(env.CUSTOM_SECRET).toBeUndefined()
+    expect(env.OPENAI_BASE_URL).toBeUndefined()
+    expect(env.OPENAI_API_BASE).toBeUndefined()
+    expect(env.AZURE_OPENAI_ENDPOINT).toBeUndefined()
   })
 
   test("captures CLI version, pins, and provider usage without storing prompt or output", async () => {
@@ -191,7 +197,7 @@ describe("isolated CLI completion", () => {
     },
     { type: "error", message: "private error text" },
     { type: "turn.failed", error: { message: "private turn error" } },
-  ])("fails exit-zero calls closed on $type and retains both failed attempts", async (event) => {
+  ])("fails exit-zero calls closed on $type; a reroute is not retried", async (event) => {
     installFakeCodex([event])
     process.env.HERMES_MB_CODEX_MODEL = "gpt-6.1-sol"
     let telemetry: CliCallTelemetry | undefined
@@ -210,9 +216,10 @@ describe("isolated CLI completion", () => {
     expect(returnedText).toBeUndefined()
     expect((caught as CliCallError).telemetry).toBe(telemetry!)
     expect(telemetry?.version).toBe("memorybench-cli-call-v1")
-    expect(telemetry?.retryCount).toBe(1)
+    const rerouted = event.type === "item.completed"
+    expect(telemetry?.retryCount).toBe(rerouted ? 0 : 1)
     expect(telemetry?.usageComplete).toBe(false)
-    expect(telemetry?.attempts).toHaveLength(2)
+    expect(telemetry?.attempts).toHaveLength(rerouted ? 1 : 2)
     for (const attempt of telemetry!.attempts) {
       expect(attempt).toMatchObject({
         status: "failed",
