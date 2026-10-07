@@ -41,6 +41,8 @@ export interface CodexJsonlTelemetry {
   usage?: CliProviderUsage
   eventCount: number
   errorEventCount: number
+  errorItemCount: number
+  reroute?: { requested: string; served: string }
   eventStreamSha256: string
 }
 
@@ -49,7 +51,7 @@ export interface CliAttemptTelemetry extends CodexJsonlTelemetry {
   status: "completed" | "failed" | "timed_out" | "spawn_error"
   startedAt: string
   durationMs: number
-  errorCode?: "process_exit" | "timeout" | "spawn_error" | "output_read"
+  errorCode?: "process_exit" | "timeout" | "spawn_error" | "output_read" | "error_event"
 }
 
 export interface CliCallTelemetry {
@@ -461,6 +463,8 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
   let usage: CliProviderUsage | undefined
   let eventCount = 0
   let errorEventCount = 0
+  let errorItemCount = 0
+  let reroute: CodexJsonlTelemetry["reroute"]
   for (const line of jsonl.split(/\r?\n/)) {
     if (!line.trim()) continue
     eventCount++
@@ -470,6 +474,26 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
         threadId = event.thread_id
       }
       if (event.type === "error") errorEventCount++
+      if (event.type === "turn.failed") errorItemCount++
+      if (
+        ["item.started", "item.updated", "item.completed"].includes(event.type as string) &&
+        event.item &&
+        typeof event.item === "object"
+      ) {
+        const item = event.item as Record<string, unknown>
+        if (item.type === "error") {
+          errorItemCount++
+          const match =
+            typeof item.message === "string"
+              ? /^model rerouted: (\S+) -> (\S+)/.exec(item.message)
+              : null
+          if (!reroute && match) {
+            const modelId = (id: string): string =>
+              /^[A-Za-z0-9._:-]{1,64}$/.test(id) ? id : "unparsed"
+            reroute = { requested: modelId(match[1]!), served: modelId(match[2]!) }
+          }
+        }
+      }
       if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
         const raw = event.usage as Record<string, unknown>
         const counter = (value: unknown): number | undefined =>
@@ -496,6 +520,8 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
     usage,
     eventCount,
     errorEventCount,
+    errorItemCount,
+    reroute,
     eventStreamSha256: createHash("sha256").update(jsonl).digest("hex"),
   }
 }
@@ -643,8 +669,17 @@ async function codexAttempt(
         stdout += chunk
       },
     })
-    return { text, telemetry: telemetry("completed") }
+    const completed = telemetry("completed")
+    if (completed.errorEventCount > 0 || completed.errorItemCount > 0) {
+      throw new CliAttemptError("codex emitted an error event or item", {
+        ...completed,
+        status: "failed",
+        errorCode: "error_event",
+      })
+    }
+    return { text, telemetry: completed }
   } catch (error) {
+    if (error instanceof CliAttemptError) throw error
     throw new CliAttemptError(
       error instanceof Error ? error.message : String(error),
       telemetry(failedStatus(error), attemptErrorCode(error))
@@ -699,6 +734,7 @@ async function claudeAttempt(
   const emptyTelemetry = (): CodexJsonlTelemetry => ({
     eventCount: 0,
     errorEventCount: 0,
+    errorItemCount: 0,
     eventStreamSha256: createHash("sha256").update("").digest("hex"),
   })
   const telemetry = (
