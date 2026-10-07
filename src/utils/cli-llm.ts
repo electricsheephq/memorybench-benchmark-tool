@@ -842,6 +842,8 @@ export async function cliComplete(
     } catch (error) {
       lastError = error
       if (error instanceof CliAttemptError) attempts.push(error.telemetry)
+      // A reroute is not retried: it stops the sub-row, and the operator decides (lcm-x #965).
+      if (error instanceof CliAttemptError && error.telemetry.reroute) break
       if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 1_000))
     }
   }
