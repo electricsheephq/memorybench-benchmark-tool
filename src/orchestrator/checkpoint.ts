@@ -27,6 +27,7 @@ const RUNS_DIR = "./data/runs"
 export class CheckpointManager {
   private basePath: string
   private saveLock = new Map<string, Promise<void>>()
+  private pendingSave = new Map<string, RunCheckpoint>()
 
   constructor(basePath: string = RUNS_DIR) {
     this.basePath = basePath
@@ -62,15 +63,24 @@ export class CheckpointManager {
   }
 
   save(checkpoint: RunCheckpoint): void {
-    const currentQueue = this.saveLock.get(checkpoint.runId) || Promise.resolve()
-    const nextQueue = currentQueue.then(() => this._performSave(checkpoint))
-    this.saveLock.set(checkpoint.runId, nextQueue)
+    const runId = checkpoint.runId
+    this.pendingSave.set(runId, checkpoint)
+    if (this.saveLock.has(runId)) return
 
-    nextQueue.finally(() => {
-      if (this.saveLock.get(checkpoint.runId) === nextQueue) {
-        this.saveLock.delete(checkpoint.runId)
+    const drain = (async () => {
+      try {
+        while (this.pendingSave.has(runId)) {
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          const latest = this.pendingSave.get(runId)!
+          this.pendingSave.delete(runId)
+          await this._performSave(latest)
+        }
+      } finally {
+        this.saveLock.delete(runId)
       }
-    })
+    })()
+    this.saveLock.set(runId, drain)
+    void drain.catch((error) => logger.error(`Failed to save checkpoint: ${error}`))
   }
 
   private async _performSave(checkpoint: RunCheckpoint): Promise<void> {
@@ -89,7 +99,7 @@ export class CheckpointManager {
     // Windows often locks files briefly (EPERM/EBUSY), so we retry a few times
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        writeFileSync(tempPath, JSON.stringify(checkpoint, null, 2))
+        writeFileSync(tempPath, JSON.stringify(checkpoint))
         renameSync(tempPath, path)
         return // Success
       } catch (e: any) {
