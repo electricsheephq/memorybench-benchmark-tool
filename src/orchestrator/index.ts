@@ -356,6 +356,8 @@ export class Orchestrator {
     // Flush all pending checkpoint saves before marking as complete
     await this.checkpointManager.flush(checkpoint.runId)
     this.checkpointManager.updateStatus(checkpoint, "completed")
+    const closableProvider = provider as typeof provider & { close?: () => void | Promise<void> }
+    if (typeof closableProvider.close === "function") await closableProvider.close()
     logger.success("Run complete!")
   }
 

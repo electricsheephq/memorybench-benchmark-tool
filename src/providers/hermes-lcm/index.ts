@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { existsSync } from "node:fs"
+import { appendFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import type {
   IndexingProgressCallback,
   IngestOptions,
@@ -161,6 +161,7 @@ export class HermesLcmProvider implements Provider {
 
   private python = ""
   private script = ""
+  private workdir = ""
   private spawnEnv: Record<string, string> = {}
   private handles = new Map<string, BridgeHandle>()
 
@@ -178,11 +179,11 @@ export class HermesLcmProvider implements Provider {
       throw new Error(`hermes-lcm bridge script not found at ${this.script}`)
     }
 
-    const workdir = process.env.HERMES_MB_WORKDIR || join(tmpdir(), "hermes-lcm-mb")
+    this.workdir = resolve(process.env.HERMES_MB_WORKDIR || join(tmpdir(), "hermes-lcm-mb"))
     this.spawnEnv = {
       ...process.env,
       HERMES_LCM_REPO: repo,
-      HERMES_MB_WORKDIR: workdir,
+      HERMES_MB_WORKDIR: this.workdir,
       HERMES_MB_PROVIDER: process.env.HERMES_MB_PROVIDER || "fastembed",
       PYTHONUNBUFFERED: "1",
     } as Record<string, string>
@@ -265,7 +266,20 @@ export class HermesLcmProvider implements Provider {
     if (response.degraded) {
       logger.debug(`[hermes-lcm] search degraded: ${response.degraded_reason}`)
     }
-    return normalizeHermesSearchResponse(response)
+    const results = normalizeHermesSearchResponse(response)
+    appendFileSync(
+      join(this.workdir, "recall-provenance.jsonl"),
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        containerTag: options.containerTag,
+        degraded: Boolean(response.degraded),
+        degraded_reason:
+          typeof response.degraded_reason === "string" ? response.degraded_reason : null,
+        coverage: (response.provenance as { coverage?: unknown } | undefined)?.coverage ?? null,
+        result_count: results.length,
+      }) + "\n"
+    )
+    return results
   }
 
   async clear(containerTag: string): Promise<void> {
