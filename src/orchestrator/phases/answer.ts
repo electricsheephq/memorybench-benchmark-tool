@@ -308,6 +308,9 @@ export async function runAnswerPhase(
           completedAt: new Date().toISOString(),
           durationMs: Date.now() - startTime,
         })
+        if (llmCall?.attempts.some((attempt) => attempt.reroute)) {
+          throw new Error(`Answer ${question.questionId}: model rerouted; stopping per RS-ROW1 §6`)
+        }
         logger.error(`Failed to answer ${question.questionId}: ${error}`)
         logger.progress(index + 1, total, `Marked ${question.questionId} failed and continuing`)
         return { questionId: question.questionId, failed: true, error }
