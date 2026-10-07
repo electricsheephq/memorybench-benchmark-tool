@@ -7,6 +7,7 @@ import {
   buildClaudeCompletionArgs,
   buildCodexCompletionArgs,
   cliComplete,
+  CliCallError,
   parseCodexJsonlTelemetry,
   summarizeCliLedger,
   type CliCallTelemetry,
@@ -14,6 +15,42 @@ import {
 
 const originalEnv = { ...process.env }
 const tempPaths: string[] = []
+
+function installFakeCodex(events: unknown[] = []): void {
+  const dir = mkdtempSync(join(tmpdir(), "memorybench-fake-codex-"))
+  tempPaths.push(dir)
+  const executable = join(dir, "codex")
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 1.2.3\\n'
+  exit 0
+fi
+if [ -n "\${OPENAI_API_KEY+x}" ] || [ -n "\${VOYAGE_API_KEY+x}" ]; then
+  exit 91
+fi
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+IFS= read -r _prompt || true
+printf 'answer from fake CLI' > "$out"
+printf '%s\\n' '{"type":"thread.started","thread_id":"thread-1"}'
+printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"answer from fake CLI"}}'
+printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}'
+${events.map((event) => `printf '%s\\n' '${JSON.stringify(event).replaceAll("'", "'\\''")}'`).join("\n")}
+`,
+    { mode: 0o755 }
+  )
+  chmodSync(executable, 0o755)
+  process.env.PATH = `${dir}:${originalEnv.PATH || ""}`
+  process.env.HERMES_MB_LLM_CLI = "codex"
+}
 
 afterEach(() => {
   for (const key of Object.keys(process.env)) delete process.env[key]
@@ -100,37 +137,7 @@ describe("isolated CLI completion", () => {
   })
 
   test("captures CLI version, pins, and provider usage without storing prompt or output", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "memorybench-fake-codex-"))
-    tempPaths.push(dir)
-    const executable = join(dir, "codex")
-    writeFileSync(
-      executable,
-      `#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf 'codex-cli 1.2.3\\n'
-  exit 0
-fi
-if [ -n "\${OPENAI_API_KEY+x}" ] || [ -n "\${VOYAGE_API_KEY+x}" ]; then
-  exit 91
-fi
-out=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    shift
-    out="$1"
-  fi
-  shift
-done
-IFS= read -r _prompt || true
-printf 'answer from fake CLI' > "$out"
-printf '%s\\n' '{"type":"thread.started","thread_id":"thread-1"}'
-printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}'
-`,
-      { mode: 0o755 }
-    )
-    chmodSync(executable, 0o755)
-    process.env.PATH = `${dir}:${originalEnv.PATH || ""}`
-    process.env.HERMES_MB_LLM_CLI = "codex"
+    installFakeCodex()
     process.env.HERMES_MB_CODEX_MODEL = "gpt-test"
     process.env.HERMES_MB_CODEX_PROVIDER = "openai"
     process.env.HERMES_MB_CODEX_SERVICE_TIER = "priority"
@@ -168,10 +175,114 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"cached_inpu
     })
     expect(JSON.stringify(telemetry)).not.toContain("prompt must not be retained")
     expect(JSON.stringify(telemetry)).not.toContain("answer from fake CLI")
+    expect(telemetry?.attempts).toHaveLength(1)
+    expect(telemetry?.attempts[0]).toMatchObject({
+      status: "completed",
+      errorEventCount: 0,
+      errorItemCount: 0,
+    })
+    expect(telemetry?.attempts[0]?.reroute).toBeUndefined()
+  })
+
+  test.each([
+    {
+      type: "item.completed",
+      item: { type: "error", message: "model rerouted: gpt-6.1-sol -> other-model-1" },
+    },
+    { type: "error", message: "private error text" },
+    { type: "turn.failed", error: { message: "private turn error" } },
+  ])("fails exit-zero calls closed on $type and retains both failed attempts", async (event) => {
+    installFakeCodex([event])
+    process.env.HERMES_MB_CODEX_MODEL = "gpt-6.1-sol"
+    let telemetry: CliCallTelemetry | undefined
+    let returnedText: string | undefined
+    let caught: unknown
+    try {
+      returnedText = await cliComplete("prompt must not be retained", {
+        onTelemetry: (value) => {
+          telemetry = value
+        },
+      })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(CliCallError)
+    expect(returnedText).toBeUndefined()
+    expect((caught as CliCallError).telemetry).toBe(telemetry!)
+    expect(telemetry?.version).toBe("memorybench-cli-call-v1")
+    expect(telemetry?.retryCount).toBe(1)
+    expect(telemetry?.usageComplete).toBe(false)
+    expect(telemetry?.attempts).toHaveLength(2)
+    for (const attempt of telemetry!.attempts) {
+      expect(attempt).toMatchObject({
+        status: "failed",
+        errorCode: "error_event",
+        errorEventCount: event.type === "error" ? 1 : 0,
+        errorItemCount: event.type === "error" ? 0 : 1,
+      })
+      if (event.type === "item.completed") {
+        expect(attempt.reroute).toEqual({ requested: "gpt-6.1-sol", served: "other-model-1" })
+      }
+    }
+    const stored = JSON.stringify(telemetry)
+    expect(stored).not.toContain("prompt must not be retained")
+    expect(stored).not.toContain("answer from fake CLI")
+    expect(stored).not.toContain("private")
+    expect(stored).not.toContain("model rerouted:")
   })
 })
 
 describe("structured CLI ledger", () => {
+  test("counts error items, failed turns and top-level errors separately", () => {
+    const parse = (events: unknown[]) =>
+      parseCodexJsonlTelemetry(events.map((event) => JSON.stringify(event)).join("\n"))
+    const message = {
+      type: "item.completed",
+      item: { type: "agent_message", text: "private answer" },
+    }
+    const errorItem = (type: string, message: string) => ({
+      type,
+      item: { type: "error", message },
+    })
+    const rerouted = parse([
+      message,
+      errorItem("item.completed", "model rerouted: gpt-6.1-sol -> other-model-1 private suffix"),
+    ])
+    expect(rerouted).toMatchObject({
+      errorEventCount: 0,
+      errorItemCount: 1,
+      reroute: { requested: "gpt-6.1-sol", served: "other-model-1" },
+    })
+    expect(JSON.stringify(rerouted)).not.toContain("private")
+    const normal = parse([message, message])
+    expect(normal.errorItemCount).toBe(0)
+    expect(normal.reroute).toBeUndefined()
+    expect(parse([{ type: "turn.failed" }]).errorItemCount).toBe(1)
+    const multiple = parse([
+      errorItem("item.started", "model rerouted: first -> served-1"),
+      errorItem("item.updated", "model rerouted: second -> served-2"),
+      errorItem("item.completed", "other private error"),
+      { type: "error", message: "private top-level error" },
+    ])
+    expect(multiple).toMatchObject({
+      errorEventCount: 1,
+      errorItemCount: 3,
+      reroute: { requested: "first", served: "served-1" },
+    })
+  })
+
+  test.each(["invalid/id", "x".repeat(65)])("redacts invalid reroute model ids: %s", (invalid) => {
+    const parsed = parseCodexJsonlTelemetry(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "error", message: `model rerouted: ${invalid} -> ${invalid}` },
+      })
+    )
+    expect(parsed.errorItemCount).toBe(1)
+    expect(parsed.reroute).toEqual({ requested: "unparsed", served: "unparsed" })
+    expect(JSON.stringify(parsed)).not.toContain(invalid)
+  })
+
   test("parses only bounded provider telemetry and discloses mixed resume identities", () => {
     const parsed = parseCodexJsonlTelemetry(
       '{"type":"thread.started","thread_id":"t"}\n' +
