@@ -35,7 +35,9 @@ describe("Hermes-LCM durable recall provenance", () => {
       results,
       degraded: true,
       degraded_reason: "embeddings_disabled",
-      provenance: { coverage, harness_settings, other: "PROVENANCE_CONTENT_MUST_NOT_BE_RECORDED" },
+      provenance: { coverage, harness_settings, unparsed_session_dates: 2,
+        process_harness_settings: { HERMES_MB_EVENT_TIME: "off", HERMES_MB_SENDER_RENDER: "off" },
+        other: "PROVENANCE_CONTENT_MUST_NOT_BE_RECORDED" },
     })
 
     expect(await provider.search(query, { containerTag })).toBe(results)
@@ -50,6 +52,8 @@ describe("Hermes-LCM durable recall provenance", () => {
       degraded_reason: "embeddings_disabled",
       coverage,
       harness_settings,
+      process_harness_settings: { HERMES_MB_EVENT_TIME: "off", HERMES_MB_SENDER_RENDER: "off" },
+      unparsed_session_dates: 2,
       result_count: 1,
     })
     expect(new Date(row.ts).toISOString()).toBe(row.ts)
@@ -75,6 +79,7 @@ describe("Hermes-LCM durable recall provenance", () => {
           HERMES_MB_EVENT_TIME: "off",
           HERMES_MB_SENDER_RENDER: "off",
         },
+        unparsed_session_dates: 0,
         result_count: 0,
       })
     }
@@ -84,5 +89,22 @@ describe("Hermes-LCM durable recall provenance", () => {
     const { provider, path } = fixture({ ok: true, results: [] })
     mkdirSync(path)
     await expect(provider.search("query", { containerTag })).rejects.toThrow()
+  })
+
+  test("records the container total from ingest, including a resumed response", async () => {
+    const { provider, path } = fixture({
+      ok: true, documentIds: ["1"], unparsed_session_dates: 1,
+      unparsed_session_dates_total: 3, resumed: true,
+    })
+    const sessions = [{ sessionId: "synthetic", messages: [{ role: "user" as const, content: "PRIVATE_FIXTURE" }] }]
+    for (let i = 0; i < 2; i++) {
+      expect(await provider.ingest(sessions, { containerTag })).toEqual({ documentIds: ["1"] })
+    }
+    const text = readFileSync(join(path, "..", "ingest-provenance.jsonl"), "utf8")
+    const rows = text.trimEnd().split("\n").map(line => JSON.parse(line))
+    expect(rows).toHaveLength(2)
+    expect(rows.map(row => row.unparsed_session_dates)).toEqual([3, 3])
+    expect(rows.every(row => row.containerTag === containerTag)).toBe(true)
+    expect(text).not.toContain("PRIVATE_FIXTURE")
   })
 })

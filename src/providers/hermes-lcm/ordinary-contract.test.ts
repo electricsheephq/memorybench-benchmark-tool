@@ -1,7 +1,15 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { buildAnswerPrompt } from "../../orchestrator/phases/answer"
 import { getProviderConfig } from "../../utils/config"
 import { HermesLcmProvider, normalizeHermesSearchResponse } from "./index"
+
+const roots: string[] = []
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
 
 describe("Hermes-LCM ordinary provider contract", () => {
   test("passes the producer's speaker and session dates unchanged to the bridge", async () => {
@@ -15,7 +23,9 @@ describe("Hermes-LCM ordinary provider contract", () => {
       metadata: { date: "2023-05-30T18:09:00.000Z", formattedDate: "6:09 pm on 30 May, 2023" },
     }
     const requests: unknown[] = []
-    const state = provider as unknown as { handles: Map<string, unknown> }
+    const state = provider as unknown as { workdir: string; handles: Map<string, unknown> }
+    state.workdir = mkdtempSync(join(tmpdir(), "hermes-contract-"))
+    roots.push(state.workdir)
     state.handles.set("fixture", {
       request: async (payload: unknown) => {
         requests.push(payload)

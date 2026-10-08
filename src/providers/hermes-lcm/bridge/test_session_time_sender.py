@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import sys
 import types
 from datetime import datetime, timezone
@@ -87,7 +89,7 @@ def test_off_product_payload_is_byte_identical_to_base(ingest_capture, mode):
     assert payload == json.dumps(base).encode()
     assert session_id == SESSION["sessionId"]
     assert kwargs == {"source": "benchmark", "conversation_id": session_id}
-    assert response == {"ok": True, "documentIds": ["1", "2", "3"]}
+    assert response == {"ok": True, "documentIds": ["1", "2", "3"], "unparsed_session_dates_total": 0}
     assert instance._harness_settings() == {
         "HERMES_MB_EVENT_TIME": "off", "HERMES_MB_SENDER_RENDER": "off",
     }
@@ -177,3 +179,144 @@ def test_event_facets_survive_hydration_and_metadata(hydrated):
     assert metadata["event_time_source"] == hit["event_time_source"]
     without = bridge._metadata_for_recall_hit({"store_id": 1}, {})
     assert "event_time" not in without and "event_time_source" not in without
+
+
+@pytest.mark.parametrize("hydrated", [False, True])
+@pytest.mark.parametrize("observed_at, expected", [
+    (EXPECTED_EPOCH + 0.9, "2023-05-30T18:09:00Z"),
+    ("2023-05-30T20:09:00+02:00", "2023-05-30T18:09:00Z"),
+    (None, None), (True, None), (float("nan"), None), (0, None),
+    ("2023-05-30T18:09:00", None),
+])
+def test_missing_event_facets_use_observed_time_only(hydrated, observed_at, expected):
+    hit = {"kind": "message_excerpt", "store_id": 1, "event_time_source": "stale"}
+    if hydrated:
+        hit.update(content="Fixture", content_chars=7, content_returned_chars=7, content_truncated=False)
+    result = bridge._hydrate_answer_ready_hit(
+        hit, store=types.SimpleNamespace(get=lambda _id: {
+            "content": "Fixture", "timestamp": EXPECTED_EPOCH,
+            "observed_at": observed_at, "observed_at_source": "host_message_timestamp",
+        }), dag=None, query="Fixture", char_cap=100,
+    )
+    if expected is None:
+        assert "event_time" not in result and "event_time_source" not in result
+    else:
+        assert result["event_time"] == expected
+        assert result["event_time_source"] == "host_message_timestamp"
+
+
+def test_summary_never_derives_event_time():
+    result = bridge._hydrate_answer_ready_hit(
+        {"kind": "summary", "node_id": 1}, store=None,
+        dag=types.SimpleNamespace(get_node=lambda _id: types.SimpleNamespace(summary="Fixture")),
+        query="Fixture", char_cap=100,
+    )
+    assert "event_time" not in result and "event_time_source" not in result
+
+
+@pytest.mark.parametrize("event_time, sender_render", [("off", "gateway"), ("session", "off"), ("off", "off")])
+def test_ingest_and_resume_refuse_changed_modes(ingest_capture, event_time, sender_render):
+    instance, _response, _payload, session, tag = ingest_capture("session", "gateway")
+    instance.event_time_mode = event_time
+    instance.sender_render_mode = sender_render
+    for session_id in (session["sessionId"], "new-session"):
+        with pytest.raises(RuntimeError, match="recorded=.*session.*gateway.*current="):
+            instance.ingest({"containerTag": tag, "session": {**session, "sessionId": session_id}})
+    provenance = instance.initialize({"containerTag": tag})
+    assert provenance["harness_settings"] == {
+        "HERMES_MB_EVENT_TIME": "session", "HERMES_MB_SENDER_RENDER": "gateway",
+    }
+    assert provenance["process_harness_settings"] == instance._harness_settings()
+
+
+def test_legacy_container_is_off_off(make_bridge):
+    instance = make_bridge("off")
+    instance.initialize({})
+    instance._ingested_path("legacy").write_text(json.dumps({"s1": [1]}))
+    instance.event_time_mode = "session"
+    instance.sender_render_mode = "gateway"
+    provenance = instance._ingest_provenance("legacy")
+    assert set(provenance["harness_settings"].values()) == {"off"}
+    assert provenance["process_harness_settings"] == instance._harness_settings()
+    with pytest.raises(RuntimeError, match="recorded=.*off.*current=.*session.*gateway"):
+        instance.ingest({"containerTag": "legacy", "session": {"sessionId": "s1"}})
+
+
+def test_unparsed_total_survives_restart_without_counting_resume_twice(ingest_capture, make_bridge, monkeypatch):
+    instance, response, _payload, session, tag = ingest_capture("session", metadata={"date": "invalid"})
+    assert response["unparsed_session_dates_total"] == 1
+    second = make_bridge("off")
+    monkeypatch.setattr(second, "_session_has_rows", lambda *_args: False)
+    second.initialize({"containerTag": tag})
+    assert second.ingest({"containerTag": tag, "session": session})["unparsed_session_dates_total"] == 1
+    second.ingest({"containerTag": tag, "session": {**session, "sessionId": "second-bad"}})
+    assert second._ingest_provenance(tag)["unparsed_session_dates"] == 2
+    second.clear({"containerTag": tag})
+    assert not second._harness_path(tag).exists()
+    assert second._ingest_provenance(tag)["unparsed_session_dates"] == 0
+
+
+@pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
+def test_product_session_time_sender_and_both_recall_paths(make_bridge, monkeypatch):
+    """Synthetic review probes through the real product store and retrieval arms."""
+    monkeypatch.setenv("HERMES_MB_EVENT_TIME", "session")
+    monkeypatch.setenv("HERMES_MB_SENDER_RENDER", "gateway")
+    instance = make_bridge("on")
+    instance.initialize({})
+    tag = "synthetic-time-sender"
+    dates = [
+        {"date": "2023-05-30T18:09:00.000Z"},
+        {"date": "2023-05-30T18:09:00"},
+        {"date": "2023-05-30 18:09:00"},
+        {"date": "2023-05-30T20:09:00+02:00"},
+        {"date": "2023-05-30T18:09:00Z"},
+        {"formattedDate": "6:09 PM on 30 May 2023"},
+        {"formattedDate": "6:09 pm on 30 May, 2023"},
+        {"date": "unparseable"},
+    ]
+    # Clear the product's conversational chunk threshold so both raw arms run.
+    filler = " The garden beds border the fence and the hose runs past the shed toward the tall beans." * 3
+    sessions = [{
+        "sessionId": f"synthetic-{index}", "metadata": metadata,
+        "messages": [
+            {"role": "user", "speaker": "Alpha\n\x00 Team", "content": "Zephyrquill planted marigolds." + filler},
+            {"role": "assistant", "speaker": "Beta", "content": "Zephyrquill bought a trowel." + filler},
+            {"role": "user", "content": "Zephyrquill watered beans." + filler},
+        ],
+    } for index, metadata in enumerate(dates)]
+    for session in sessions:
+        instance.ingest({"containerTag": tag, "session": session})
+    resumed = instance.ingest({"containerTag": tag, "session": sessions[-1]})
+    assert resumed["resumed"] and resumed["unparsed_session_dates_total"] == 1
+    with sqlite3.connect(instance._db_path(tag)) as connection:
+        rows = connection.execute(
+            "SELECT session_id, role, content, observed_at, observed_at_source FROM messages ORDER BY store_id"
+        ).fetchall()
+    assert len(rows) == len(sessions) * 3
+    expected_by_id = {}
+    for index, session in enumerate(sessions):
+        for turn, message in enumerate(session["messages"]):
+            row = rows[index * 3 + turn]
+            epoch = EXPECTED_EPOCH + turn if index < len(dates) - 1 else None
+            assert row[3] == epoch
+            assert row[4] == ("host_message_timestamp" if epoch is not None else None)
+            prefix = ("[Alpha Team] ", "[Beta] ", "")[turn]
+            assert row[1:3] == (message["role"], prefix + message["content"])
+            expected_by_id[index * 3 + turn + 1] = epoch
+    for fusion in (None, "quota:fts=1,chunk=2"):
+        if fusion:
+            monkeypatch.setenv("HERMES_MB_FUSION", fusion)
+        response = instance.search({"containerTag": tag, "query": "Zephyrquill", "limit": 100})
+        assert response["provenance"]["unparsed_session_dates"] == 1
+        hits = [r["metadata"] for r in response["results"] if r["metadata"].get("store_id") is not None]
+        assert hits and any("event_time" in hit for hit in hits)
+        for hit in hits:
+            epoch = expected_by_id[hit["store_id"]]
+            if epoch is None:
+                assert "event_time" not in hit and "event_time_source" not in hit
+            else:
+                assert hit["event_time"] == datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                assert hit["event_time_source"] == "host_message_timestamp"
+        if fusion:
+            assert response["provenance"]["arms_run"] == ["fts", "chunk"]
+            assert {hit["arms"] for hit in hits} == {"fts", "chunk"}

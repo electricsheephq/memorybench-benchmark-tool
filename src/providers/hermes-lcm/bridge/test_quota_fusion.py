@@ -272,6 +272,7 @@ def test_search_default_keeps_lcm_recall_and_skips_quota(monkeypatch: pytest.Mon
                 "HERMES_MB_EVENT_TIME": "off",
                 "HERMES_MB_SENDER_RENDER": "off",
             },
+            "unparsed_session_dates": 0,
             "bridge_answer_ready": {
                 "content_char_cap": 2400,
                 "exact_read_hydrated_count": 0,
@@ -313,10 +314,11 @@ def test_search_quota_routes_canned_arms_and_emits_provenance(monkeypatch: pytes
 
     assert calls == [("collect", 200)]
     assert response["fusion_mode"] == "quota:fts=1,chunk=2,floor=0"
-    assert response["provenance"]["harness_settings"] == {
+    assert response["provenance"]["process_harness_settings"] == {
         "HERMES_MB_EVENT_TIME": "session",
         "HERMES_MB_SENDER_RENDER": "gateway",
     }
+    assert set(response["provenance"]["harness_settings"].values()) == {"off"}
     assert response["degraded"] is False
     assert response["degraded_reason"] is None
     assert [row["metadata"]["store_id"] for row in response["results"]] == [1, 3, 2]
