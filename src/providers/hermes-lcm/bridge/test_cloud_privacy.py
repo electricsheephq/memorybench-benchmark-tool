@@ -151,6 +151,7 @@ def test_cloud_validator_block_refuses_ingest(cloud, bridge_env):
             "cloud embedding privacy residual detector blocked pattern names: api_key"
         )
 
+    original = protection.validate_embedding_privacy_dispatch
     bridge_env.setattr(protection, "validate_embedding_privacy_dispatch", block)
     instance.test_phase["name"] = "ingest"
     with pytest.raises(RuntimeError) as refused:
@@ -162,6 +163,11 @@ def test_cloud_validator_block_refuses_ingest(cloud, bridge_env):
     assert not [c for c in calls if c["phase"] == "ingest" and c["input_type"] == "document"]
     # Fail closed: the session is never recorded as ingested.
     assert not instance._ingested_path("blocked").exists()
+    # Nothing is persisted before the refusal, so a corrected policy can resume the same container.
+    assert not instance._session_has_rows(instance._db_path("blocked"), SESSION["sessionId"])
+    bridge_env.setattr(protection, "validate_embedding_privacy_dispatch", original)
+    instance.ingest({"containerTag": "blocked", "session": SESSION})
+    assert instance._ingested_path("blocked").exists()
 
 
 def test_local_provider_keeps_empty_revision_and_raw_documents(bridge_env):
