@@ -36,14 +36,38 @@ export interface CliProviderUsage {
   reasoningOutputTokens: number
 }
 
+export type CodexErrorClass =
+  | "model_rerouted"
+  | "reconnecting"
+  | "stream_disconnected"
+  | "usage_limit"
+  | "rate_limited"
+  | "other"
+
 export interface CodexJsonlTelemetry {
   threadId?: string
   usage?: CliProviderUsage
   eventCount: number
   errorEventCount: number
   errorItemCount: number
+  /** Error events, failed turns and error items by class; the message text is never kept (lcm-x #976). */
+  errorClasses?: Partial<Record<CodexErrorClass, number>>
+  /** sha256 of the first 8 distinct error messages, so repeats can be matched across attempts. */
+  errorMessageSha256?: string[]
   reroute?: { requested: string; served: string }
   eventStreamSha256: string
+}
+
+const MAX_ERROR_MESSAGE_DIGESTS = 8
+
+function classifyCodexError(message: unknown): CodexErrorClass {
+  if (typeof message !== "string") return "other"
+  if (/^model rerouted: /.test(message)) return "model_rerouted"
+  if (/^Reconnecting\.\.\./.test(message)) return "reconnecting"
+  if (/stream disconnected/i.test(message)) return "stream_disconnected"
+  if (/usage limit/i.test(message)) return "usage_limit"
+  if (/rate limit|too many requests|\b429\b/i.test(message)) return "rate_limited"
+  return "other"
 }
 
 export interface CliAttemptTelemetry extends CodexJsonlTelemetry {
@@ -465,6 +489,20 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
   let errorEventCount = 0
   let errorItemCount = 0
   let reroute: CodexJsonlTelemetry["reroute"]
+  const errorClasses: Partial<Record<CodexErrorClass, number>> = {}
+  const errorMessageSha256: string[] = []
+  const recordError = (message: unknown): void => {
+    const errorClass = classifyCodexError(message)
+    errorClasses[errorClass] = (errorClasses[errorClass] ?? 0) + 1
+    if (typeof message !== "string") return
+    const digest = createHash("sha256").update(message).digest("hex")
+    if (
+      errorMessageSha256.length < MAX_ERROR_MESSAGE_DIGESTS &&
+      !errorMessageSha256.includes(digest)
+    ) {
+      errorMessageSha256.push(digest)
+    }
+  }
   for (const line of jsonl.split(/\r?\n/)) {
     if (!line.trim()) continue
     eventCount++
@@ -473,8 +511,19 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
       if (event.type === "thread.started" && typeof event.thread_id === "string") {
         threadId = event.thread_id
       }
-      if (event.type === "error") errorEventCount++
-      if (event.type === "turn.failed") errorItemCount++
+      if (event.type === "error") {
+        errorEventCount++
+        recordError(event.message)
+      }
+      if (event.type === "turn.failed") {
+        errorItemCount++
+        const failure = event.error
+        recordError(
+          failure && typeof failure === "object"
+            ? (failure as Record<string, unknown>).message
+            : undefined
+        )
+      }
       if (
         ["item.started", "item.updated", "item.completed"].includes(event.type as string) &&
         event.item &&
@@ -483,6 +532,7 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
         const item = event.item as Record<string, unknown>
         if (item.type === "error") {
           errorItemCount++
+          recordError(item.message)
           const match =
             typeof item.message === "string"
               ? /^model rerouted: (\S+) -> (\S+)/.exec(item.message)
@@ -521,6 +571,8 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
     eventCount,
     errorEventCount,
     errorItemCount,
+    errorClasses,
+    errorMessageSha256,
     reroute,
     eventStreamSha256: createHash("sha256").update(jsonl).digest("hex"),
   }
