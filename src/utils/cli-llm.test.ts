@@ -278,6 +278,50 @@ describe("structured CLI ledger", () => {
     })
   })
 
+  test("classifies error messages and keeps only their digests (lcm-x #976)", () => {
+    const parse = (events: unknown[]) =>
+      parseCodexJsonlTelemetry(events.map((event) => JSON.stringify(event)).join("\n"))
+    const parsed = parse([
+      {
+        type: "error",
+        message: "Reconnecting... 1/5 (stream disconnected before completion: private detail)",
+      },
+      {
+        type: "error",
+        message: "Reconnecting... 2/5 (stream disconnected before completion: private detail)",
+      },
+      { type: "error", message: "stream disconnected before completion: private detail" },
+      {
+        type: "item.completed",
+        item: { type: "error", message: "model rerouted: gpt-6.1-sol -> other-model-1 private" },
+      },
+      { type: "turn.failed", error: { message: "You've hit your usage limit. private" } },
+      { type: "error", message: "429 Too Many Requests: rate limit reached, private" },
+      { type: "error", message: "something else private" },
+      { type: "error", message: { not: "a string" } },
+    ])
+    expect(parsed.errorClasses).toEqual({
+      reconnecting: 2,
+      stream_disconnected: 1,
+      model_rerouted: 1,
+      usage_limit: 1,
+      rate_limited: 1,
+      other: 2,
+    })
+    expect(parsed.errorMessageSha256).toHaveLength(7)
+    for (const digest of parsed.errorMessageSha256!) expect(digest).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.stringify(parsed)).not.toContain("private")
+    expect(JSON.stringify(parsed)).not.toContain("Reconnecting")
+    const many = parse(
+      Array.from({ length: 20 }, (_, index) => ({ type: "error", message: `distinct ${index}` }))
+    )
+    expect(many.errorClasses).toEqual({ other: 20 })
+    expect(many.errorMessageSha256).toHaveLength(8)
+    const clean = parse([{ type: "turn.completed" }])
+    expect(clean.errorClasses).toEqual({})
+    expect(clean.errorMessageSha256).toEqual([])
+  })
+
   test.each(["invalid/id", "x".repeat(65)])("redacts invalid reroute model ids: %s", (invalid) => {
     const parsed = parseCodexJsonlTelemetry(
       JSON.stringify({
