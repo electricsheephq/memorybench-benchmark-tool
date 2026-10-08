@@ -696,6 +696,10 @@ class Bridge:
             summary_text = self._deterministic_session_summary(messages)
             order = self._order.get(container_tag, len(ingested)) + 1
             self._order[container_tag] = order
+            # Time bounds from the session's stored rows, as product compaction sets them: lcm_recall's recency
+            # prior reads a node's latest_at, so without them every summary hit sat at the recency floor while
+            # message hits, stored at ingest time, did not (lcm-x #950).
+            earliest_at, latest_at = store.get_time_bounds(store_ids)
             node_id = dag.add_node(
                 SummaryNode(
                     session_id=session_id,
@@ -705,6 +709,8 @@ class Bridge:
                     source_token_count=sum(len(m["content"].split()) for m in messages),
                     source_type="messages",
                     created_at=float(order),
+                    earliest_at=earliest_at,
+                    latest_at=latest_at,
                 )
             )
             if self.embeddings_enabled:

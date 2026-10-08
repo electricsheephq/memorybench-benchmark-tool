@@ -234,6 +234,23 @@ def test_product_positive_control(make_bridge, monkeypatch, tmp_path):
         Path(evidence).write_text(json.dumps(receipts, indent=2) + "\n")
 
 
+@pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
+def test_summary_node_carries_the_sessions_time_bounds(make_bridge):
+    """lcm-x #950: lcm_recall's recency prior reads a summary node's latest_at. With created_at 1..N alone, every
+    summary hit sat at the recency floor (0.5) while message hits, stored at ingest time, scored about 1.0."""
+    session, _ = _short_conversation()
+    instance = make_bridge("off")
+    instance.initialize({})
+    instance.ingest({"containerTag": "bounds", "session": session})
+    with sqlite3.connect(instance._db_path("bounds")) as connection:
+        node = connection.execute("SELECT session_id, earliest_at, latest_at FROM summary_nodes").fetchone()
+        bounds = connection.execute(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE session_id = ?", (node[0],)
+        ).fetchone()
+    assert bounds[1] is not None
+    assert tuple(node[1:]) == tuple(bounds)
+
+
 def test_resume_skips_a_session_already_ingested(make_bridge, tmp_path):
     instance = make_bridge("off")
     instance.initialize({})
