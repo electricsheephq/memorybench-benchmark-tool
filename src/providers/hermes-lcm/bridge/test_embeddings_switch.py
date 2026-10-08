@@ -256,7 +256,7 @@ def test_resume_skips_a_session_already_ingested(make_bridge, tmp_path):
     instance.initialize({})
     instance._ingested_path("resume").write_text(json.dumps({"s1": [4, 5, 6]}), encoding="utf-8")
     reply = instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
-    assert reply == {"ok": True, "documentIds": ["4", "5", "6"], "resumed": True}
+    assert reply == {"ok": True, "documentIds": ["4", "5", "6"], "resumed": True, "unparsed_session_dates_total": 0}
     assert not instance._db_path("resume").exists()
 
 

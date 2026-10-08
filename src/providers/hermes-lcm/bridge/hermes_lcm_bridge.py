@@ -33,6 +33,8 @@ Environment:
     HERMES_MB_WORKDIR              base dir for per-container LCM dbs (required)
     HERMES_MB_PROVIDER            embedding provider: fastembed (default) | voyage | stub
     HERMES_MB_EMBEDDINGS          on (default) | off (full-text recall)
+    HERMES_MB_EVENT_TIME          off (default) | session (declared event time)
+    HERMES_MB_SENDER_RENDER       off (default) | gateway ([speaker] content)
     HERMES_MB_MODEL              embedding model id (default per provider)
     HERMES_MB_ANSWER_READY_CONTENT_CHARS
                                   per-result exact-read cap (default 2400)
@@ -43,12 +45,13 @@ Environment:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
 import time
 import traceback
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -100,6 +103,76 @@ def _positive_int_env(name: str, default: int) -> int:
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive integer")
     return value
+
+
+def _mode_env(name: str, enabled: str) -> str:
+    value = os.environ.get(name, "off")
+    if value not in {"off", enabled}:
+        raise RuntimeError(f"{name} must be off or {enabled}")
+    return value
+
+
+def _session_epoch(value: Any) -> float | None:
+    """Parse the producers' ISO or formatted session dates; naive means UTC."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        match = re.fullmatch(
+            r"(\d{1,2}):(\d{2})\s*(am|pm)\s+on\s+(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})",
+            raw, re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        hour, minute, ampm, day, month_name, year = match.groups()
+        months = (
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+        )
+        month = next(
+            (i for i, name in enumerate(months, 1) if name.startswith(month_name.lower())),
+            None,
+        )
+        if month is None or not 1 <= int(hour) <= 12:
+            return None
+        try:
+            parsed = datetime(
+                int(year), month, int(day),
+                int(hour) % 12 + (12 if ampm.lower() == "pm" else 0), int(minute),
+            )
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _ingest_messages(
+    session: dict[str, Any], *, event_time: str, sender_render: str
+) -> tuple[list[dict[str, Any]], int]:
+    metadata = session.get("metadata") or {}
+    epoch = None
+    if event_time == "session":
+        for value in (metadata.get("date"), metadata.get("formattedDate")):
+            epoch = _session_epoch(value)
+            if epoch is not None:
+                break
+    messages = []
+    for index, message in enumerate(session.get("messages", [])):
+        content = str(message.get("content", ""))
+        if sender_render == "gateway" and message.get("speaker") is not None:
+            # Gateway neutralization: replace line/control characters, then
+            # collapse whitespace. Apply to both roles for the declared F61 arm.
+            speaker = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(message["speaker"]))
+            speaker = " ".join(speaker.split())
+            content = f"[{speaker}] {content}"
+        row = {"role": str(message.get("role", "user")), "content": content}
+        if epoch is not None:
+            row["timestamp"] = epoch + index
+        messages.append(row)
+    return messages, int(event_time == "session" and epoch is None)
 
 
 def _parse_fusion_mode(raw: str | None = None) -> tuple[int, int, int] | None:
@@ -259,6 +332,41 @@ def _content_window(
     }
 
 
+def _recall_event_time(stored: dict[str, Any]) -> dict[str, str]:
+    """Match lcm-x #1005 (acad6047): observed host time, never write time."""
+    value = stored.get("observed_at")
+    if value is None or isinstance(value, bool):
+        return {}
+    if isinstance(value, (int, float)):
+        observed_at = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return {}
+        try:
+            observed_at = float(raw)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return {}
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return {}
+            observed_at = parsed.timestamp()
+    else:
+        return {}
+    if not math.isfinite(observed_at) or observed_at <= 0:
+        return {}
+    try:
+        event_time = datetime.fromtimestamp(observed_at, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return {}
+    fields = {"event_time": event_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    if stored.get("observed_at_source"):
+        fields["event_time_source"] = str(stored["observed_at_source"])
+    return fields
+
+
 def _hydrate_answer_ready_hit(
     hit: dict[str, Any],
     *,
@@ -276,6 +384,15 @@ def _hydrate_answer_ready_hit(
     if hit.get("content") is not None and all(
         hit.get(field) is not None for field in required_metadata
     ):
+        if hit.get("kind") != "summary" and hit.get("event_time") is None:
+            store_id = hit.get("store_id")
+            stored = store.get(int(store_id)) if store_id is not None else None
+            if stored is not None:
+                hydrated = dict(hit)
+                hydrated.pop("event_time", None)
+                hydrated.pop("event_time_source", None)
+                hydrated.update(_recall_event_time(stored))
+                return hydrated
         return hit
 
     hydrated = dict(hit)
@@ -312,6 +429,10 @@ def _hydrate_answer_ready_hit(
                 f"cannot hydrate answer-ready message hit without store_id {store_id!r}"
             )
         content = str(stored.get("content") or "")
+        if hit.get("event_time") is None:
+            hydrated.pop("event_time", None)
+            hydrated.pop("event_time_source", None)
+            hydrated.update(_recall_event_time(stored))
         span = hit.get("chunk_span") or {}
         try:
             match_start = int(span["char_start"])
@@ -354,6 +475,8 @@ def _metadata_for_recall_hit(
     for facet in (
         "exact_ref",
         "timestamp",
+        "event_time",
+        "event_time_source",
         "role",
         "source",
         "content_source",
@@ -442,6 +565,8 @@ class Bridge:
         if embeddings not in {"on", "off"}:
             raise RuntimeError("HERMES_MB_EMBEDDINGS must be on or off")
         self.embeddings_enabled = embeddings == "on"
+        self.event_time_mode = _mode_env("HERMES_MB_EVENT_TIME", "session")
+        self.sender_render_mode = _mode_env("HERMES_MB_SENDER_RENDER", "gateway")
         self._initialized = False
 
         self.provider_name = (
@@ -482,7 +607,7 @@ class Bridge:
 
     # -- lifecycle ------------------------------------------------------------
 
-    def initialize(self, _req: dict[str, Any]) -> dict[str, Any]:
+    def initialize(self, req: dict[str, Any]) -> dict[str, Any]:
         if not self.embeddings_enabled and os.environ.get("HERMES_MB_FUSION"):
             raise RuntimeError(
                 "HERMES_MB_EMBEDDINGS=off requires empty HERMES_MB_FUSION; "
@@ -502,6 +627,7 @@ class Bridge:
             "model": self.model,
             "dim": self.dim,
             "embeddings_enabled": self.embeddings_enabled,
+            **self._ingest_provenance(req.get("containerTag")),
         }
 
     def _ensure_embedder(self) -> None:
@@ -515,14 +641,79 @@ class Bridge:
 
     # -- helpers --------------------------------------------------------------
 
+    def _harness_settings(self) -> dict[str, str]:
+        return {
+            "HERMES_MB_EVENT_TIME": self.event_time_mode,
+            "HERMES_MB_SENDER_RENDER": self.sender_render_mode,
+        }
+
+    def _harness_path(self, container_tag: str) -> Path:
+        return self.workdir / f"{_safe(container_tag)}.harness.json"
+
+    def _load_harness(self, container_tag: str) -> dict[str, Any]:
+        path = self._harness_path(container_tag)
+        if path.exists():
+            # A corrupt marker must never silently relabel an existing store.
+            return json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "harness_settings": {
+                "HERMES_MB_EVENT_TIME": "off", "HERMES_MB_SENDER_RENDER": "off",
+            },
+            "unparsed_session_dates": 0,
+            "unparsed_session_ids": [],
+        }
+
+    def _write_harness(self, container_tag: str, marker: dict[str, Any]) -> None:
+        path = self._harness_path(container_tag)
+        partial = path.with_suffix(".tmp")
+        partial.write_text(json.dumps(marker), encoding="utf-8")
+        os.replace(partial, path)
+
+    def _ingest_provenance(self, container_tag: str | None) -> dict[str, Any]:
+        if container_tag is None:
+            return {"harness_settings": self._harness_settings(), "unparsed_session_dates": 0}
+        marker = self._load_harness(container_tag)
+        provenance = {
+            "harness_settings": marker["harness_settings"],
+            "unparsed_session_dates": marker["unparsed_session_dates"],
+        }
+        current = self._harness_settings()
+        if current != marker["harness_settings"]:
+            provenance["process_harness_settings"] = current
+        return provenance
+
+    def _enforce_ingest_modes(self, container_tag: str) -> dict[str, Any]:
+        marker = self._load_harness(container_tag)
+        if not any(path.exists() for path in (
+            self._harness_path(container_tag), self._ingested_path(container_tag),
+            self._db_path(container_tag),
+        )):
+            marker["harness_settings"] = self._harness_settings()
+        current = self._harness_settings()
+        if current != marker["harness_settings"]:
+            raise RuntimeError(
+                f"container ingest modes differ: recorded={marker['harness_settings']}; "
+                f"current={current}; use a fresh container"
+            )
+        self._write_harness(container_tag, marker)
+        return marker
+
+    def _record_unparsed_date(
+        self, container_tag: str, marker: dict[str, Any], session_id: str, count: int
+    ) -> int:
+        if count and session_id not in marker["unparsed_session_ids"]:
+            marker["unparsed_session_ids"].append(session_id)
+            marker["unparsed_session_dates"] += count
+            self._write_harness(container_tag, marker)
+        return marker["unparsed_session_dates"]
+
     def _db_path(self, container_tag: str) -> Path:
         return self.workdir / f"{_safe(container_tag)}.db"
 
     def _dates_path(self, container_tag: str) -> Path:
         # A sidecar mapping session_id -> harness-provided session date. The
-        # plugin's append_batch stamps ingest wall-clock time (it takes no
-        # per-message timestamp and must not be modified), so the real session
-        # date -- data the harness gives EVERY provider -- is preserved here and
+        # declared event time is opt-in; preserve the real session date --
+        # data the harness gives EVERY provider -- here in either mode and
         # surfaced onto each search hit's metadata for temporal questions.
         return self.workdir / f"{_safe(container_tag)}.dates.json"
 
@@ -576,17 +767,18 @@ class Bridge:
         if not self._initialized:
             raise RuntimeError("ingest before initialize")
         container_tag = str(req["containerTag"])
+        harness = self._enforce_ingest_modes(container_tag)
         session = req["session"]
         session_id = str(session["sessionId"])
         session_meta = session.get("metadata") or {}
         session_date = session_meta.get("date") or session_meta.get("formattedDate")
-        messages = [
-            {
-                "role": str(m.get("role", "user")),
-                "content": str(m.get("content", "")),
-            }
-            for m in session.get("messages", [])
-        ]
+        messages, unparsed_dates = _ingest_messages(
+            session, event_time=self.event_time_mode, sender_render=self.sender_render_mode
+        )
+        date_report = (
+            {"unparsed_session_dates": unparsed_dates}
+            if self.event_time_mode == "session" else {}
+        )
         # A watchdog resume re-sends every session the orchestrator had not yet
         # recorded. A session this container already holds in full is skipped; a
         # session cut off mid-ingest (rows stored, no completion record) stops the
@@ -597,6 +789,10 @@ class Bridge:
                 "ok": True,
                 "documentIds": [str(sid) for sid in ingested[session_id]] or [session_id],
                 "resumed": True,
+                "unparsed_session_dates_total": self._record_unparsed_date(
+                    container_tag, harness, session_id, unparsed_dates
+                ),
+                **date_report,
             }
 
         from hermes_lcm.chunking import iter_message_chunks
@@ -741,6 +937,10 @@ class Bridge:
         return {
             "ok": True,
             "documentIds": [str(sid) for sid in store_ids] or [session_id],
+            "unparsed_session_dates_total": self._record_unparsed_date(
+                container_tag, harness, session_id, unparsed_dates
+            ),
+            **date_report,
         }
 
     # -- search ---------------------------------------------------------------
@@ -846,6 +1046,7 @@ class Bridge:
 
         provenance = {
             "mode": "quota",
+            **self._ingest_provenance(container_tag),
             "fusion_mode": fusion_mode,
             "arms_run": ["fts", "chunk"],
             "candidate_limit": 200,
@@ -942,6 +1143,7 @@ class Bridge:
             store.close()
 
         provenance = dict(payload.get("provenance", {}))
+        provenance.update(self._ingest_provenance(container_tag))
         provenance["bridge_answer_ready"] = {
             "content_char_cap": self.answer_ready_content_chars,
             "exact_read_hydrated_count": bridge_hydrated_count,
@@ -1590,6 +1792,10 @@ class Bridge:
         dates_path = self._dates_path(container_tag)
         if dates_path.exists():
             dates_path.unlink()
+        harness_path = self._harness_path(container_tag)
+        for path in (harness_path, harness_path.with_suffix(".tmp")):
+            if path.exists():
+                path.unlink()
         self._order.pop(container_tag, None)
         return {"ok": True}
 

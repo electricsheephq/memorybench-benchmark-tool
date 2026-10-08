@@ -225,7 +225,7 @@ export class HermesLcmProvider implements Provider {
 
     const handle = this.spawnHandle(tag)
     this.handles.set(tag, handle)
-    await handle.request({ cmd: "initialize" }, INITIALIZE_TIMEOUT_MS)
+    await handle.request({ cmd: "initialize", containerTag: tag }, INITIALIZE_TIMEOUT_MS)
     return handle
   }
 
@@ -239,6 +239,14 @@ export class HermesLcmProvider implements Provider {
         session,
       })
       documentIds.push(...((response.documentIds as string[]) || []))
+      appendFileSync(
+        join(this.workdir, "ingest-provenance.jsonl"),
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          containerTag: options.containerTag,
+          unparsed_session_dates: response.unparsed_session_dates_total ?? 0,
+        }) + "\n"
+      )
     }
     return { documentIds }
   }
@@ -276,6 +284,18 @@ export class HermesLcmProvider implements Provider {
         degraded_reason:
           typeof response.degraded_reason === "string" ? response.degraded_reason : null,
         coverage: (response.provenance as { coverage?: unknown } | undefined)?.coverage ?? null,
+        harness_settings: (response.provenance as { harness_settings?: unknown } | undefined)
+          ?.harness_settings ?? {
+          HERMES_MB_EVENT_TIME: "off",
+          HERMES_MB_SENDER_RENDER: "off",
+        },
+        ...((response.provenance as { process_harness_settings?: unknown } | undefined)
+          ?.process_harness_settings !== undefined ? {
+          process_harness_settings: (response.provenance as { process_harness_settings: unknown })
+            .process_harness_settings,
+        } : {}),
+        unparsed_session_dates: (response.provenance as { unparsed_session_dates?: unknown } | undefined)
+          ?.unparsed_session_dates ?? 0,
         result_count: results.length,
       }) + "\n"
     )
