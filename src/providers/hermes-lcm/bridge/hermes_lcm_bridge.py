@@ -650,6 +650,19 @@ class Bridge:
                     f"session {session_id} is partly stored in container {container_tag} "
                     "by an interrupted ingest; rebuild this container's store before resuming"
                 )
+            if privacy_revision is not None:
+                # Refuse before anything is persisted, so a corrected policy can resume this container:
+                # the same chunk texts (store ids do not enter chunk text) and the session summary.
+                provisional = [
+                    {"store_id": i, "role": m["role"], "content": m["content"]}
+                    for i, m in enumerate(messages)
+                ]
+                _protect_documents(
+                    [c.text for c in iter_message_chunks(provisional, policy="conversational")]
+                    + [self._deterministic_session_summary(messages)],
+                    config,
+                    privacy_revision,
+                )
             if messages:
                 store_ids = store.append_batch(
                     session_id, messages, source="benchmark", conversation_id=session_id
