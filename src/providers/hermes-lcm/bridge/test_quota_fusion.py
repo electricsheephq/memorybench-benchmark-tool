@@ -208,6 +208,8 @@ def fixture_bridge(monkeypatch: pytest.MonkeyPatch) -> bridge.Bridge:
     instance = bridge.Bridge.__new__(bridge.Bridge)
     instance.embedder = _FakeEmbedder()
     instance.embeddings_enabled = True
+    instance.event_time_mode = "off"
+    instance.sender_render_mode = "off"
     instance._initialized = True
     instance.provider_name = "fastembed"
     instance.workdir = Path("/fixture-workdir")
@@ -266,6 +268,10 @@ def test_search_default_keeps_lcm_recall_and_skips_quota(monkeypatch: pytest.Mon
         "results": [],
         "provenance": {
             "source": "fixture-default",
+            "harness_settings": {
+                "HERMES_MB_EVENT_TIME": "off",
+                "HERMES_MB_SENDER_RENDER": "off",
+            },
             "bridge_answer_ready": {
                 "content_char_cap": 2400,
                 "exact_read_hydrated_count": 0,
@@ -286,6 +292,8 @@ def test_search_quota_routes_canned_arms_and_emits_provenance(monkeypatch: pytes
     install_fake_hermes_modules(monkeypatch, tools)
     monkeypatch.setenv("HERMES_MB_FUSION", "quota:fts=1,chunk=2")
     instance = fixture_bridge(monkeypatch)
+    instance.event_time_mode = "session"
+    instance.sender_render_mode = "gateway"
     calls: list[tuple[str, int]] = []
 
     def collect(*_args: object, **_kwargs: object) -> dict[str, list[dict[str, object]]]:
@@ -305,6 +313,10 @@ def test_search_quota_routes_canned_arms_and_emits_provenance(monkeypatch: pytes
 
     assert calls == [("collect", 200)]
     assert response["fusion_mode"] == "quota:fts=1,chunk=2,floor=0"
+    assert response["provenance"]["harness_settings"] == {
+        "HERMES_MB_EVENT_TIME": "session",
+        "HERMES_MB_SENDER_RENDER": "gateway",
+    }
     assert response["degraded"] is False
     assert response["degraded_reason"] is None
     assert [row["metadata"]["store_id"] for row in response["results"]] == [1, 3, 2]

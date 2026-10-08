@@ -26,12 +26,16 @@ describe("Hermes-LCM durable recall provenance", () => {
     const query = "QUERY_MUST_NOT_BE_RECORDED"
     const results = [{ content: "CONTENT_MUST_NOT_BE_RECORDED" }]
     const coverage = { fts: "ok", nested: { preserved: true } }
+    const harness_settings = {
+      HERMES_MB_EVENT_TIME: "session",
+      HERMES_MB_SENDER_RENDER: "gateway",
+    }
     const { provider, path } = fixture({
       ok: true,
       results,
       degraded: true,
       degraded_reason: "embeddings_disabled",
-      provenance: { coverage, other: "PROVENANCE_CONTENT_MUST_NOT_BE_RECORDED" },
+      provenance: { coverage, harness_settings, other: "PROVENANCE_CONTENT_MUST_NOT_BE_RECORDED" },
     })
 
     expect(await provider.search(query, { containerTag })).toBe(results)
@@ -45,6 +49,7 @@ describe("Hermes-LCM durable recall provenance", () => {
       degraded: true,
       degraded_reason: "embeddings_disabled",
       coverage,
+      harness_settings,
       result_count: 1,
     })
     expect(new Date(row.ts).toISOString()).toBe(row.ts)
@@ -66,6 +71,10 @@ describe("Hermes-LCM durable recall provenance", () => {
         degraded: false,
         degraded_reason: null,
         coverage: null,
+        harness_settings: {
+          HERMES_MB_EVENT_TIME: "off",
+          HERMES_MB_SENDER_RENDER: "off",
+        },
         result_count: 0,
       })
     }

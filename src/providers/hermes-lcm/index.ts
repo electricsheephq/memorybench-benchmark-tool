@@ -276,6 +276,11 @@ export class HermesLcmProvider implements Provider {
         degraded_reason:
           typeof response.degraded_reason === "string" ? response.degraded_reason : null,
         coverage: (response.provenance as { coverage?: unknown } | undefined)?.coverage ?? null,
+        harness_settings: (response.provenance as { harness_settings?: unknown } | undefined)
+          ?.harness_settings ?? {
+          HERMES_MB_EVENT_TIME: "off",
+          HERMES_MB_SENDER_RENDER: "off",
+        },
         result_count: results.length,
       }) + "\n"
     )
