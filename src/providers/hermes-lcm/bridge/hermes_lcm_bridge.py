@@ -393,6 +393,36 @@ def _exact_ref_for_content(
     }
 
 
+def _protect_documents(
+    texts: list[str], config: Any, revision: str | None
+) -> list[str]:
+    """Apply the product's cloud document pair: protect, then validate dispatch.
+
+    ``revision is None`` (a local provider) returns the texts untouched. A
+    policy block refuses the container's ingest; the product's error names
+    patterns only, never text.
+    """
+    if revision is None:
+        return texts
+    from hermes_lcm.ingest_protection import (
+        EmbeddingPrivacyPolicyError,
+        protect_embedding_text,
+        validate_embedding_privacy_dispatch,
+    )
+
+    try:
+        protected = [
+            protect_embedding_text(text, config, expected_revision=revision)[0]
+            for text in texts
+        ]
+        validate_embedding_privacy_dispatch(
+            protected, config, expected_revision=revision
+        )
+    except EmbeddingPrivacyPolicyError as exc:
+        raise RuntimeError(f"privacy_refused: {exc}") from exc
+    return protected
+
+
 class Bridge:
     def __init__(self) -> None:
         repo = os.environ.get("HERMES_LCM_REPO")
@@ -571,6 +601,10 @@ class Bridge:
 
         from hermes_lcm.chunking import iter_message_chunks
         from hermes_lcm.dag import SummaryDAG, SummaryNode
+        from hermes_lcm.ingest_protection import (
+            embedding_privacy_revision,
+            embedding_provider_requires_privacy,
+        )
         from hermes_lcm.store import MessageStore
         from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
@@ -581,19 +615,29 @@ class Bridge:
         store = MessageStore(str(db_path), ingest_protection_config=config)
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)
+        privacy_revision = None
         try:
             if self.embeddings_enabled:
-                vector_store.register_profile(self.model, self.provider_name, self.dim)
+                # Cloud providers register under the active privacy revision,
+                # as the product does, or lcm_recall treats the stored vectors
+                # as embedding_identity_stale and runs full text only.
+                if embedding_provider_requires_privacy(self.provider_name):
+                    privacy_revision = embedding_privacy_revision(config)
+                vector_store.register_profile(
+                    self.model, self.provider_name, self.dim,
+                    revision=privacy_revision or "",
+                )
                 identity = vector_store.capture_identity(
                     self.model, provider=self.provider_name
                 )
                 vector_store.register_profile(
-                    self.model, self.provider_name, self.dim, task="chunk"
+                    self.model, self.provider_name, self.dim, task="chunk",
+                    revision=privacy_revision or "",
                 )
                 chunk_identity = EmbeddingIdentity.canonical(
                     self.provider_name,
                     self.model,
-                    "",
+                    privacy_revision or "",
                     self.dim,
                     "float32",
                     "little",
@@ -620,7 +664,9 @@ class Bridge:
                     chunk_texts.append(chunk.text)
                     chunk_meta.append(chunk)
                 if chunk_texts and self.embeddings_enabled:
-                    chunk_vectors = self.embedder.embed_documents(chunk_texts)
+                    chunk_vectors = self.embedder.embed_documents(
+                        _protect_documents(chunk_texts, config, privacy_revision)
+                    )
                     for chunk, vector in zip(chunk_meta, chunk_vectors):
                         vector_store.record_chunk_embedding(
                             chunk.chunk_id,
@@ -649,7 +695,9 @@ class Bridge:
                 )
             )
             if self.embeddings_enabled:
-                summary_vector = self.embedder.embed_documents([summary_text])[0]
+                summary_vector = self.embedder.embed_documents(
+                    _protect_documents([summary_text], config, privacy_revision)
+                )[0]
                 vector_store.record_embedding(
                     str(node_id), "summary", self.model, summary_vector, identity=identity
                 )
