@@ -39,6 +39,7 @@ export interface CliProviderUsage {
 export type CodexErrorClass =
   | "model_rerouted"
   | "reconnecting"
+  | "transport_fallback"
   | "stream_disconnected"
   | "usage_limit"
   | "rate_limited"
@@ -50,6 +51,9 @@ export interface CodexJsonlTelemetry {
   eventCount: number
   errorEventCount: number
   errorItemCount: number
+  turnCompleted: boolean
+  turnFailed: boolean
+  recoveredTransportErrors?: number
   /** Error events, failed turns and error items by class; the message text is never kept (lcm-x #976). */
   errorClasses?: Partial<Record<CodexErrorClass, number>>
   /** sha256 of the first 8 distinct error messages, so repeats can be matched across attempts. */
@@ -64,6 +68,7 @@ function classifyCodexError(message: unknown): CodexErrorClass {
   if (typeof message !== "string") return "other"
   if (/^model rerouted: /.test(message)) return "model_rerouted"
   if (/^Reconnecting\.\.\./.test(message)) return "reconnecting"
+  if (/^Falling back from WebSockets to HTTPS transport/.test(message)) return "transport_fallback"
   if (/stream disconnected/i.test(message)) return "stream_disconnected"
   if (/usage limit/i.test(message)) return "usage_limit"
   if (/rate limit|too many requests|\b429\b/i.test(message)) return "rate_limited"
@@ -97,6 +102,7 @@ export interface CliCallTelemetry {
   usageComplete: boolean
   totalDurationMs: number
   retryCount: number
+  recoveredTransportErrors?: number
 }
 
 export class CliCallError extends Error {
@@ -130,6 +136,7 @@ export function summarizeCliLedger(phases: CliLedgerPhase[]): {
   executionIdentityCount: number
   mixedExecutionIdentity: boolean
   callLedgerComplete: boolean
+  recoveredTransportErrors: number
 } {
   const calls = phases.flatMap(cliCallsFromPhase)
   const completed = phases.filter((phase) => phase.status === "completed")
@@ -151,6 +158,10 @@ export function summarizeCliLedger(phases: CliLedgerPhase[]): {
     calls,
     callCount: calls.length,
     retryCount: calls.reduce((sum, call) => sum + call.retryCount, 0),
+    recoveredTransportErrors: calls.reduce(
+      (sum, call) => sum + (call.recoveredTransportErrors ?? 0),
+      0
+    ),
     executionIdentityCount,
     mixedExecutionIdentity: executionIdentityCount > 1,
     callLedgerComplete:
@@ -343,7 +354,7 @@ function requestedExecution(
     model: model || "codex default (un-pinned)",
     modelExplicit: Boolean(model),
     reasoningEffort: effortOverride || effortForRole(role),
-    provider: process.env.HERMES_MB_CODEX_PROVIDER || "openai",
+    provider: codexProvider(process.env.HERMES_MB_CODEX_PROVIDER || "openai"),
     serviceTier: process.env.HERMES_MB_CODEX_SERVICE_TIER || "priority",
     pinSource: model ? "explicit-cli-argv" : "un-pinned",
   }
@@ -393,6 +404,17 @@ function tomlString(value: string): string {
   return JSON.stringify(value)
 }
 
+function codexProvider(provider: string): string {
+  const transport = process.env.HERMES_MB_CODEX_TRANSPORT
+  if (transport !== undefined && transport !== "https") {
+    throw new Error('HERMES_MB_CODEX_TRANSPORT must be "https" or unset')
+  }
+  if (transport === "https" && provider !== "openai" && provider !== "openai-https") {
+    throw new Error("HERMES_MB_CODEX_TRANSPORT=https requires the openai provider")
+  }
+  return transport === "https" && provider === "openai" ? "openai-https" : provider
+}
+
 export function buildCodexCompletionArgs(
   outFile: string,
   effort: string,
@@ -401,6 +423,7 @@ export function buildCodexCompletionArgs(
   provider = process.env.HERMES_MB_CODEX_PROVIDER || "openai",
   serviceTier = process.env.HERMES_MB_CODEX_SERVICE_TIER || "priority"
 ): string[] {
+  const effectiveProvider = codexProvider(provider)
   const args = [
     "exec",
     "--ignore-user-config",
@@ -413,7 +436,7 @@ export function buildCodexCompletionArgs(
     "-c",
     `model_reasoning_effort=${effort}`,
     "-c",
-    `model_provider=${tomlString(provider)}`,
+    `model_provider=${tomlString(effectiveProvider)}`,
     "-c",
     `service_tier=${tomlString(serviceTier)}`,
     "-c",
@@ -459,6 +482,12 @@ export function buildCodexCompletionArgs(
     "-o",
     outFile,
   ]
+  if (process.env.HERMES_MB_CODEX_TRANSPORT === "https" && effectiveProvider === "openai-https") {
+    args.push(
+      "-c",
+      'model_providers.openai-https={name="OpenAI HTTPS", base_url="https://chatgpt.com/backend-api/codex", wire_api="responses", requires_openai_auth=true, supports_websockets=false}'
+    )
+  }
   if (model) args.push("-m", model)
   args.push("-")
   return args
@@ -488,6 +517,8 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
   let eventCount = 0
   let errorEventCount = 0
   let errorItemCount = 0
+  let turnCompleted = false
+  let turnFailed = false
   let reroute: CodexJsonlTelemetry["reroute"]
   const errorClasses: Partial<Record<CodexErrorClass, number>> = {}
   const errorMessageSha256: string[] = []
@@ -516,6 +547,7 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
         recordError(event.message)
       }
       if (event.type === "turn.failed") {
+        turnFailed = true
         errorItemCount++
         const failure = event.error
         recordError(
@@ -544,6 +576,7 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
           }
         }
       }
+      if (event.type === "turn.completed") turnCompleted = true
       if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
         const raw = event.usage as Record<string, unknown>
         const counter = (value: unknown): number | undefined =>
@@ -571,11 +604,27 @@ export function parseCodexJsonlTelemetry(jsonl: string): CodexJsonlTelemetry {
     eventCount,
     errorEventCount,
     errorItemCount,
+    turnCompleted,
+    turnFailed,
     errorClasses,
     errorMessageSha256,
     reroute,
     eventStreamSha256: createHash("sha256").update(jsonl).digest("hex"),
   }
+}
+
+/** Only a completed, usage-bearing turn can recover transport-only warnings. */
+export function isRecoveredTransportOnly(telemetry: CodexJsonlTelemetry): boolean {
+  return (
+    telemetry.turnCompleted &&
+    Boolean(telemetry.usage) &&
+    telemetry.reroute === undefined &&
+    !telemetry.turnFailed &&
+    Object.entries(telemetry.errorClasses ?? {}).every(
+      ([errorClass, count]) =>
+        count <= 0 || errorClass === "reconnecting" || errorClass === "transport_fallback"
+    )
+  )
 }
 
 type ProcessFailureKind = "process_exit" | "timeout" | "spawn_error" | "output_read"
@@ -723,6 +772,10 @@ async function codexAttempt(
     })
     const completed = telemetry("completed")
     if (completed.errorEventCount > 0 || completed.errorItemCount > 0) {
+      if (isRecoveredTransportOnly(completed)) {
+        completed.recoveredTransportErrors = completed.errorEventCount + completed.errorItemCount
+        return { text, telemetry: completed }
+      }
       throw new CliAttemptError("codex emitted an error event or item", {
         ...completed,
         status: "failed",
@@ -787,6 +840,8 @@ async function claudeAttempt(
     eventCount: 0,
     errorEventCount: 0,
     errorItemCount: 0,
+    turnCompleted: false,
+    turnFailed: false,
     eventStreamSha256: createHash("sha256").update("").digest("hex"),
   })
   const telemetry = (
@@ -854,6 +909,10 @@ function aggregateCliTelemetry(
       attempts.every((attempt) => attempt.status === "completed" && Boolean(attempt.usage)),
     totalDurationMs: attempts.reduce((sum, attempt) => sum + attempt.durationMs, 0),
     retryCount: Math.max(0, attempts.length - 1),
+    recoveredTransportErrors: attempts.reduce(
+      (sum, attempt) => sum + (attempt.recoveredTransportErrors ?? 0),
+      0
+    ),
   }
 }
 
