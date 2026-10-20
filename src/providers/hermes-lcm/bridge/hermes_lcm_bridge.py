@@ -645,6 +645,7 @@ class Bridge:
                     token_count=len(summary_text.split()),
                     source_token_count=sum(len(m["content"].split()) for m in messages),
                     source_type="messages",
+                    source_ids=store_ids,
                     created_at=float(order),
                 )
             )
