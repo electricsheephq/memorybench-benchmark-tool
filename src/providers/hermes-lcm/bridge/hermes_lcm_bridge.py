@@ -553,7 +553,10 @@ class Bridge:
         messages = [
             {
                 "role": str(m.get("role", "user")),
-                "content": str(m.get("content", "")),
+                "content": (
+                    f"{m['speaker']}: {str(m.get('content', ''))}"
+                    if m.get("speaker") else str(m.get("content", ""))
+                ),
             }
             for m in session.get("messages", [])
         ]
