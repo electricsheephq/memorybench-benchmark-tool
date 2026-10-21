@@ -212,6 +212,9 @@ export class Orchestrator {
         checkpoint.targetQuestionIds ?? allQuestions.map((q) => q.questionId)
       )
       assertResumeIdentities(checkpoint, identities, phases)
+      if (/^sha256:/.test(checkpoint.readerPromptVersion ?? "")) {
+        logger.warn("legacy checkpoint: prompt identity covers the main prompt renders only; start a fresh run for full coverage")
+      }
       // Judge-overridden copies clear these fields. Stamp them when scoring
       // first resumes, while leaving legacy checkpoints without identities alone.
       if (phases.includes("evaluate") && checkpoint.datasetSha256 !== undefined) {

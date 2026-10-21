@@ -201,6 +201,9 @@ function setup(name: string) {
   mock.module(source + "/src/utils/config.ts",()=>({config:{},getProviderConfig:()=>({apiKey:""}),getJudgeConfig:()=>({apiKey:""})}));
   const { Orchestrator } = await import(source + "/src/orchestrator/index.ts");
   const { runIdentities } = await import(source + "/src/orchestrator/identities.ts");
+  const warnings = [];
+  const { logger } = await import(source + "/src/utils/logger.ts");
+  logger.warn = message => warnings.push(message);
   const runner = new Orchestrator();
   const options = {provider:name,benchmark:"locomo",judgeModel:"gpt-4o",answeringModel:"gpt-4o",runId:"probe",phases:[]};
   const path = "./data/runs/probe/checkpoint.json";
@@ -224,6 +227,8 @@ for (const [key, checkpoint] of Object.entries({ ...legacy, command: legacy.file
       ${key === "cli" ? 'process.env.HERMES_MB_LLM_CLI="codex";' : ""}
       ${key === "command" ? 'const {runCommand}=await import(source+"/src/cli/commands/run.ts");await runCommand(["-r","probe","-f","answer"]);' : 'await runner.run({...options,phases:["answer"]});'}
       if (read().readerPromptVersion !== saved.readerPromptVersion || initialized !== 1) throw new Error("legacy rewrite/init");
+      if (warnings.filter(message => message === "legacy checkpoint: prompt identity covers the main prompt renders only; start a fresh run for full coverage").length !== 1)
+        throw new Error("legacy warning must appear exactly once");
     `
     )
   })
@@ -276,6 +281,56 @@ test("shared session is serialized once while both questions retain its id", () 
     benchmark.getHaystackSessions=()=>[session];
     runIdentities(benchmark,{name,prompts},"openai:gpt-4o");
     if(serializations!==1) throw new Error("shared session serialized " + serializations + " times");
+  `
+  )
+})
+
+
+test("tagged fresh runs and resumes never print the legacy warning", () => {
+  probe(
+    setup("filesystem") +
+      `
+    await runner.run(options);
+    await runner.run({...options,phases:["answer"]});
+    if (warnings.some(message => message.includes("legacy checkpoint:"))) throw new Error("tagged warning");
+  `
+  )
+})
+
+// Adapted from Astra's session-collision-head probe; checkpoints are synthetic.
+test("conflicting shared session content from either question refuses before init without writes", () => {
+  probe(
+    setup("filesystem") +
+      `
+    benchmark.getQuestions=()=>["q1","q2"].map(questionId=>({questionId,question:"Q",groundTruth:"A",questionType:"single-hop",haystackSessionIds:["shared"]}));
+    const perQuestion={q1:[{sessionId:"shared",messages:[{role:"user",content:"A"}]}],q2:[{sessionId:"shared",messages:[{role:"user",content:"B"}]}]};
+    benchmark.getHaystackSessions=id=>perQuestion[id];
+    await runner.run(options);
+    await runner.run(options);
+    const before=readFileSync(path,"utf8"), count=initialized;
+    for (const [id, original] of [["q1","A"],["q2","B"]]) {
+      perQuestion[id][0].messages[0].content="CHANGED " + original;
+      let error="";
+      try { await runner.run(options); } catch(e) { error=e.message; }
+      if (!error.includes("identity mismatch: normalizedInputsSha256") || initialized!==count || readFileSync(path,"utf8")!==before)
+        throw new Error(id + " content change accepted or checkpoint/provider touched: " + error);
+      perQuestion[id][0].messages[0].content=original;
+    }
+  `
+  )
+})
+
+test("equal shared content in distinct objects is deduplicated", () => {
+  probe(
+    setup("filesystem") +
+      `
+    benchmark.getQuestions=()=>["q1","q2"].map(questionId=>({questionId,question:"Q",groundTruth:"A",questionType:"single-hop",haystackSessionIds:["shared"]}));
+    const session={sessionId:"shared",messages:[{role:"user",content:"Synthetic"}]};
+    benchmark.getHaystackSessions=()=>[session];
+    const shared=runIdentities(benchmark,{name,prompts},"openai:gpt-4o").normalizedInputsSha256;
+    benchmark.getHaystackSessions=()=>[JSON.parse(JSON.stringify(session))];
+    const copied=runIdentities(benchmark,{name,prompts},"openai:gpt-4o").normalizedInputsSha256;
+    if (shared!==copied) throw new Error("equal-content objects serialized more than once");
   `
   )
 })

@@ -147,25 +147,36 @@ export function runIdentities(
     )
   )
   const questions = benchmark.getQuestions()
-  const sessions = new Map<string, UnifiedSession>()
+  const sessions = new Map<string, Set<string>>()
+  const serializedSessions = new WeakMap<UnifiedSession, string>()
   const normalizedInputs = [...questions]
     .sort((a, b) => a.questionId.localeCompare(b.questionId))
     .map((question) => ({
       question,
       sessions: benchmark.getHaystackSessions(question.questionId).map((session) => {
-        sessions.set(session.sessionId, session)
+        const content = serializedSessions.get(session) ?? JSON.stringify(session)
+        serializedSessions.set(session, content)
+        const variants = sessions.get(session.sessionId) ?? new Set<string>()
+        variants.add(content)
+        sessions.set(session.sessionId, variants)
         return session.sessionId
       }),
     }))
+  // Sort ids as before; retain distinct content in first-seen question order.
+  // Reuse serialized session JSON so shared objects are read only once, while
+  // preserving the exact previous JSON bytes for datasets without conflicting ids.
+  const sessionEntries = [...sessions]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([id, variants]) => [...variants].map((content) => `[${JSON.stringify(id)},${content}]`))
+  const normalizedInputsSha256 = createHash("sha256")
+    .update(`{"questions":${JSON.stringify(normalizedInputs)},"sessions":[${sessionEntries.join(",")}]}`)
+    .digest("hex")
   const cliJudge = judge.startsWith("cli:") ? cliLlmProvenance("judge") : null
   return {
     datasetPath: benchmark.datasetPath,
     datasetSha256: benchmark.datasetSha256,
     questionSetSha256: questionSetSha256(questions.map((q) => q.questionId)),
-    normalizedInputsSha256: hashJson({
-      questions: normalizedInputs,
-      sessions: [...sessions].sort(([a], [b]) => a.localeCompare(b)),
-    }),
+    normalizedInputsSha256,
     loaderOrderSha256: questionSetSha256(questions.map((q) => q.questionId)),
     promptVersion: `sha256:${hashJson(judgePrompts)}`,
     readerPromptVersion: legacyReader
