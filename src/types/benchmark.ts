@@ -11,7 +11,12 @@ export interface QuestionFilter {
   offset?: number
 }
 
-export interface Benchmark {
+export interface DatasetIdentity {
+  datasetSha256: string
+  datasetPath: string
+}
+
+export interface Benchmark extends Partial<DatasetIdentity> {
   name: string
   load(config?: BenchmarkConfig): Promise<void>
   getQuestions(filter?: QuestionFilter): UnifiedQuestion[]

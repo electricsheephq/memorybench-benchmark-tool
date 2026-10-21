@@ -1,3 +1,4 @@
+import { runIdentities, assertResumeIdentities } from "./identities"
 import type { ProviderName } from "../types/provider"
 import type { BenchmarkName } from "../types/benchmark"
 import type { JudgeName } from "../types/judge"
@@ -109,8 +110,10 @@ export class Orchestrator {
   async run(options: OrchestratorOptions): Promise<void> {
     const resume = options.force ? undefined : this.checkpointManager.load(options.runId)
     assertSafeHarnessModes(
-      resume, options.phases && !options.phases.includes("answer")
-        ? resume?.answeringModel : options.answeringModel
+      resume,
+      options.phases && !options.phases.includes("answer")
+        ? resume?.answeringModel
+        : options.answeringModel
     )
     const {
       provider: providerName,
@@ -157,6 +160,11 @@ export class Orchestrator {
       logger.info("Cleared existing checkpoint (--force)")
     }
 
+    const benchmark = createBenchmark(benchmarkName)
+    await benchmark.load()
+    const provider = createProvider(providerName)
+    const identities = runIdentities(benchmark, provider, cliLlmBackend() ? "cli" : judgeName)
+
     let checkpoint!: RunCheckpoint
     let effectiveLimit: number | undefined
     let targetQuestionIds: string[] | undefined
@@ -170,18 +178,23 @@ export class Orchestrator {
         benchmarkName,
         judgeModel,
         answeringModel,
-        { limit, sampling, concurrency, status: "initializing",
-          dataSourceRunId: force ? `${runId}-force-${randomUUID()}` : undefined }
+        {
+          identities,
+          limit,
+          sampling,
+          concurrency,
+          status: "initializing",
+          dataSourceRunId: force ? `${runId}-force-${randomUUID()}` : undefined,
+        }
       )
       logger.info("Created checkpoint (initializing)")
     }
 
-    const benchmark = createBenchmark(benchmarkName)
-    await benchmark.load()
     const allQuestions = benchmark.getQuestions()
 
     if (this.checkpointManager.exists(runId) && !isNewRun) {
       checkpoint = this.checkpointManager.load(runId)!
+      assertResumeIdentities(checkpoint, identities)
 
       effectiveLimit = checkpoint.limit
       targetQuestionIds = checkpoint.targetQuestionIds
@@ -301,8 +314,8 @@ export class Orchestrator {
     }
     this.checkpointManager.save(checkpoint)
 
-    const provider = createProvider(providerName)
     let primaryFailed = false
+    // prettier-ignore
     try {
     await provider.initialize(getProviderConfig(providerName))
 

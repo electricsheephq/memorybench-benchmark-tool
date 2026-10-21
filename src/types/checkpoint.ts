@@ -1,3 +1,4 @@
+import type { DatasetIdentity } from "./benchmark"
 import type { SearchResult, RetrievalMetrics } from "./unified"
 import type { IngestResult, RecallHealth, RecallConfig } from "./provider"
 import type { ConcurrencyConfig } from "./concurrency"
@@ -151,7 +152,13 @@ export interface CliLedgerSummary {
   callLedgerComplete: boolean
 }
 
-export interface RunCheckpoint {
+export interface RunIdentities extends DatasetIdentity {
+  promptVersion: string
+  scoringPath: string
+  answerPresentationMode: import("../prompts/evidence-cards").AnswerPresentationMode
+}
+
+export interface RunCheckpoint extends Partial<RunIdentities> {
   recallConfig?: RecallConfig
   runId: string
   dataSourceRunId: string
@@ -160,7 +167,6 @@ export interface RunCheckpoint {
   benchmark: string
   judge: string
   answeringModel: string
-  answerPresentationMode?: import("../prompts/evidence-cards").AnswerPresentationMode
   answererProvenance?: LlmExecutionProvenance
   judgeProvenance?: LlmExecutionProvenance
   createdAt: string

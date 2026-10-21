@@ -1,3 +1,4 @@
+import { datasetIdentity, relativeDatasetPath } from "../../orchestrator/identities"
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import type { Benchmark, BenchmarkConfig, QuestionFilter } from "../../types/benchmark"
@@ -105,20 +106,24 @@ function getMessageContent(message: LoCoMoMessage): string {
 
 export class LoCoMoBenchmark implements Benchmark {
   name = "locomo"
+  datasetSha256?: string
+  datasetPath?: string
   private data: LoCoMoItem[] = []
   private questions: UnifiedQuestion[] = []
   private sessionsMap: Map<string, UnifiedSession[]> = new Map()
 
   async load(config?: BenchmarkConfig): Promise<void> {
     const dataPath = config?.dataPath || DEFAULT_DATA_PATH
-    const fullPath = join(process.cwd(), dataPath)
+    const fullPath = join(process.cwd(), relativeDatasetPath(dataPath))
 
     if (!existsSync(fullPath)) {
       logger.info("Downloading LoCoMo dataset from GitHub...")
       await this.downloadDataset(fullPath)
     }
 
-    this.data = JSON.parse(readFileSync(fullPath, "utf8"))
+    const bytes = readFileSync(fullPath)
+    Object.assign(this, datasetIdentity(dataPath, bytes))
+    this.data = JSON.parse(bytes.toString("utf8"))
     logger.info(`Loaded ${this.data.length} conversations from LoCoMo`)
 
     this.processData()

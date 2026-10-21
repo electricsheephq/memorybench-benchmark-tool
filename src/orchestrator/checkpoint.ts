@@ -12,6 +12,7 @@ import {
 import { basename, join } from "path"
 import type {
   RunCheckpoint,
+  RunIdentities,
   QuestionCheckpoint,
   PhaseStatus,
   PhaseId,
@@ -144,6 +145,7 @@ export class CheckpointManager {
     judge: string,
     answeringModel: string,
     options?: {
+      identities?: RunIdentities
       limit?: number
       sampling?: SamplingConfig
       targetQuestionIds?: string[]
@@ -153,6 +155,7 @@ export class CheckpointManager {
     }
   ): RunCheckpoint {
     const checkpoint: RunCheckpoint = {
+      ...options?.identities,
       runId,
       dataSourceRunId: options?.dataSourceRunId || runId,
       status: options?.status || "initializing",
@@ -373,6 +376,11 @@ export class CheckpointManager {
       runId: newRunId,
       dataSourceRunId: source.dataSourceRunId || sourceRunId, // Keep original data source
       status: "running",
+      datasetSha256: source.datasetSha256,
+      datasetPath: source.datasetPath,
+      promptVersion: source.promptVersion,
+      scoringPath: source.scoringPath,
+      answerPresentationMode: source.answerPresentationMode,
       provider: source.provider,
       recallConfig: fromIndex > PHASE_ORDER.indexOf("search") ? source.recallConfig : undefined,
       benchmark: source.benchmark,
