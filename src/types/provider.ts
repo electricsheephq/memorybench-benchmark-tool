@@ -32,7 +32,17 @@ export interface IndexingProgress {
 
 export type IndexingProgressCallback = (progress: IndexingProgress) => void
 
+export type RecallConfig = "OFF" | "LOCAL" | "VOYAGE-TRACKER" | "UNKNOWN"
+
+export interface RecallHealth {
+  degraded: boolean
+  degradedReason: string | null
+  timeout: boolean
+  coverage: Record<string, string> | null
+}
+
 export interface Provider {
+  recallConfig?: RecallConfig
   name: string
   prompts?: ProviderPrompts
   concurrency?: ConcurrencyConfig
@@ -44,6 +54,10 @@ export interface Provider {
     onProgress?: IndexingProgressCallback
   ): Promise<void>
   search(query: string, options: SearchOptions): Promise<unknown[]>
+  searchWithHealth?(
+    query: string,
+    options: SearchOptions
+  ): Promise<{ results: unknown[]; health: RecallHealth }>
   clear(containerTag: string): Promise<void>
 }
 

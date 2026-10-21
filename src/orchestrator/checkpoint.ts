@@ -121,16 +121,20 @@ export class CheckpointManager {
     // If we get here, all retries failed or it was a non-retriable error
     try {
       unlinkSync(tempPath)
-    } catch { }
+    } catch {}
     throw lastError
   }
 
   async flush(runId?: string): Promise<void> {
-    const ids = runId ? [runId] : [...new Set([...this.saveLock.keys(), ...this.pendingSave.keys()])]
-    await Promise.all(ids.map(async (id) => {
-      if (!this.saveLock.has(id) && this.pendingSave.has(id)) this.save(this.pendingSave.get(id)!)
-      await this.saveLock.get(id)
-    }))
+    const ids = runId
+      ? [runId]
+      : [...new Set([...this.saveLock.keys(), ...this.pendingSave.keys()])]
+    await Promise.all(
+      ids.map(async (id) => {
+        if (!this.saveLock.has(id) && this.pendingSave.has(id)) this.save(this.pendingSave.get(id)!)
+        await this.saveLock.get(id)
+      })
+    )
   }
 
   create(
@@ -300,12 +304,12 @@ export class CheckpointManager {
       evaluated: questions.filter((q) => q.phases.evaluate.status === "completed").length,
       ...(episodesTotal > 0
         ? {
-          indexingEpisodes: {
-            total: episodesTotal,
-            completed: episodesCompleted,
-            failed: episodesFailed,
-          },
-        }
+            indexingEpisodes: {
+              total: episodesTotal,
+              completed: episodesCompleted,
+              failed: episodesFailed,
+            },
+          }
         : {}),
     }
   }
@@ -370,6 +374,7 @@ export class CheckpointManager {
       dataSourceRunId: source.dataSourceRunId || sourceRunId, // Keep original data source
       status: "running",
       provider: source.provider,
+      recallConfig: fromIndex > PHASE_ORDER.indexOf("search") ? source.recallConfig : undefined,
       benchmark: source.benchmark,
       judge: overrides?.judge || source.judge,
       answeringModel: overrides?.answeringModel || source.answeringModel,

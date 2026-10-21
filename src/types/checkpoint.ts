@@ -1,5 +1,5 @@
 import type { SearchResult, RetrievalMetrics } from "./unified"
-import type { IngestResult } from "./provider"
+import type { IngestResult, RecallHealth, RecallConfig } from "./provider"
 import type { ConcurrencyConfig } from "./concurrency"
 
 export type PhaseStatus = "pending" | "in_progress" | "completed" | "failed"
@@ -42,6 +42,7 @@ export interface IndexingPhaseCheckpoint {
 }
 
 export interface SearchPhaseCheckpoint {
+  recallHealth?: RecallHealth | null
   status: PhaseStatus
   resultFile?: string
   results?: SearchResult[]
@@ -151,6 +152,7 @@ export interface CliLedgerSummary {
 }
 
 export interface RunCheckpoint {
+  recallConfig?: RecallConfig
   runId: string
   dataSourceRunId: string
   status: RunStatus

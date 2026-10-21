@@ -8,6 +8,8 @@ import type {
   IngestResult,
   Provider,
   ProviderConfig,
+  RecallConfig,
+  RecallHealth,
   SearchOptions,
 } from "../../types/provider"
 import type { UnifiedSession } from "../../types/unified"
@@ -171,7 +173,11 @@ class BridgeHandle {
     this.stopping = (async () => {
       if (this.proc.exitCode !== null || this.proc.signalCode !== null) return
       const timer = setTimeout(() => this.proc.kill("SIGKILL"), 1000)
-      try { await this.exited } finally { clearTimeout(timer) }
+      try {
+        await this.exited
+      } finally {
+        clearTimeout(timer)
+      }
     })()
     return this.stopping
   }
@@ -182,6 +188,8 @@ export class HermesLcmProvider implements Provider {
   name = "hermes-lcm"
   prompts = HERMES_LCM_PROMPTS
   concurrency = { default: PROVIDER_CONCURRENCY }
+
+  recallConfig: RecallConfig = "UNKNOWN"
 
   private python = ""
   private script = ""
@@ -215,6 +223,17 @@ export class HermesLcmProvider implements Provider {
     const probe = this.spawnHandle("__probe__")
     try {
       const response = await probe.request({ cmd: "initialize" }, INITIALIZE_TIMEOUT_MS)
+      // Use the initialized bridge settings, including its provider alias normalization.
+      this.recallConfig =
+        response.embeddings_enabled === false
+          ? "OFF"
+          : response.embeddings_enabled !== true
+            ? "UNKNOWN"
+            : response.provider === "fastembed"
+              ? "LOCAL"
+              : response.provider === "voyage"
+                ? "VOYAGE-TRACKER"
+                : "UNKNOWN"
       logger.info(
         `Initialized hermes-lcm provider (provider=${response.provider}, model=${response.model}, dim=${response.dim}, concurrency=${PROVIDER_CONCURRENCY})`
       )
@@ -295,6 +314,13 @@ export class HermesLcmProvider implements Provider {
   }
 
   async search(query: string, options: SearchOptions): Promise<unknown[]> {
+    return (await this.searchWithHealth(query, options)).results
+  }
+
+  async searchWithHealth(
+    query: string,
+    options: SearchOptions
+  ): Promise<{ results: unknown[]; health: RecallHealth }> {
     const handle = await this.getHandle(options.containerTag)
     const response = await handle.request({
       cmd: "search",
@@ -321,16 +347,36 @@ export class HermesLcmProvider implements Provider {
           HERMES_MB_SENDER_RENDER: "off",
         },
         ...((response.provenance as { process_harness_settings?: unknown } | undefined)
-          ?.process_harness_settings !== undefined ? {
-          process_harness_settings: (response.provenance as { process_harness_settings: unknown })
-            .process_harness_settings,
-        } : {}),
-        unparsed_session_dates: (response.provenance as { unparsed_session_dates?: unknown } | undefined)
-          ?.unparsed_session_dates ?? 0,
+          ?.process_harness_settings !== undefined
+          ? {
+              process_harness_settings: (
+                response.provenance as { process_harness_settings: unknown }
+              ).process_harness_settings,
+            }
+          : {}),
+        unparsed_session_dates:
+          (response.provenance as { unparsed_session_dates?: unknown } | undefined)
+            ?.unparsed_session_dates ?? 0,
         result_count: results.length,
       }) + "\n"
     )
-    return results
+    const coverage = (response.provenance as { coverage?: unknown } | undefined)?.coverage
+    return {
+      results,
+      health: {
+        degraded: Boolean(response.degraded),
+        degradedReason:
+          typeof response.degraded_reason === "string" ? response.degraded_reason : null,
+        timeout: Boolean(response.timeout),
+        coverage:
+          coverage &&
+          typeof coverage === "object" &&
+          !Array.isArray(coverage) &&
+          Object.values(coverage).every((value) => typeof value === "string")
+            ? (coverage as Record<string, string>)
+            : null,
+      },
+    }
   }
 
   async clear(containerTag: string): Promise<void> {

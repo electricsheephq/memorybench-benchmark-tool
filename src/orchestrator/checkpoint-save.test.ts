@@ -31,13 +31,17 @@ describe("coalesced checkpoint saves", () => {
     const writer = manager as unknown as { _performSave(checkpoint: RunCheckpoint): Promise<void> }
     const performSave = writer._performSave.bind(manager)
     let reject!: (error: Error) => void, began!: () => void
-    const started = new Promise<void>((resolve) => { began = resolve })
+    const started = new Promise<void>((resolve) => {
+      began = resolve
+    })
     let first = true
     const writes = spyOn(writer, "_performSave").mockImplementation(async (latest) => {
       if (first) {
         first = false
         began()
-        await new Promise<void>((_resolve, fail) => { reject = fail })
+        await new Promise<void>((_resolve, fail) => {
+          reject = fail
+        })
       }
       await performSave(latest)
     })
@@ -54,7 +58,9 @@ describe("coalesced checkpoint saves", () => {
   test("50 large saves coalesce, persist the final state, and let a timer run", async () => {
     const { manager, checkpoint } = fixture()
     manager.initQuestion(checkpoint, "q", "fixture-container", {
-      question: "x".repeat(5 * 1024 * 1024), groundTruth: "fixture", questionType: "fixture",
+      question: "x".repeat(5 * 1024 * 1024),
+      groundTruth: "fixture",
+      questionType: "fixture",
     })
     expect(JSON.stringify(checkpoint).length).toBeGreaterThanOrEqual(5 * 1024 * 1024)
     const rename = fs.renameSync
@@ -74,17 +80,20 @@ describe("coalesced checkpoint saves", () => {
       checkpoint.limit = i
       manager.save(checkpoint)
     }
-    const timer = new Promise<void>((resolve) => setTimeout(() => {
-      timerFired = true
-      resolve()
-    }, 0))
+    const timer = new Promise<void>((resolve) =>
+      setTimeout(() => {
+        timerFired = true
+        resolve()
+      }, 0)
+    )
     await manager.flush(checkpoint.runId)
     await timer
     expect(writes.mock.calls.length).toBeLessThanOrEqual(2)
     expect(timerStates.at(-1)).toBe(true)
     expect(manager.load(checkpoint.runId)).toEqual(checkpoint)
-    expect(fs.readFileSync(manager.getCheckpointPath(checkpoint.runId), "utf8"))
-      .toBe(JSON.stringify(manager.load(checkpoint.runId)))
+    expect(fs.readFileSync(manager.getCheckpointPath(checkpoint.runId), "utf8")).toBe(
+      JSON.stringify(manager.load(checkpoint.runId))
+    )
   })
 
   test("flush waits for the pending dirty write, including a replacement checkpoint", async () => {
@@ -92,9 +101,13 @@ describe("coalesced checkpoint saves", () => {
     const writer = manager as unknown as { _performSave(checkpoint: RunCheckpoint): Promise<void> }
     const performSave = writer._performSave.bind(manager)
     let signalWritten!: () => void
-    const firstWritten = new Promise<void>((resolve) => { signalWritten = resolve })
+    const firstWritten = new Promise<void>((resolve) => {
+      signalWritten = resolve
+    })
     let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
     let count = 0
     const writes = spyOn(writer, "_performSave").mockImplementation(async (latest) => {
       await performSave(latest)
@@ -108,7 +121,9 @@ describe("coalesced checkpoint saves", () => {
     const final = { ...checkpoint, limit: 123 }
     manager.save(final)
     let flushed = false
-    const flushing = manager.flush(checkpoint.runId).then(() => { flushed = true })
+    const flushing = manager.flush(checkpoint.runId).then(() => {
+      flushed = true
+    })
     await new Promise<void>((resolve) => setImmediate(resolve))
     expect(flushed).toBe(false)
     expect(manager.load(checkpoint.runId)?.limit).toBeUndefined()
@@ -124,8 +139,11 @@ describe("orchestrator provider cleanup", () => {
     test(`search ${fails ? "failure rejects" : "success completes"} after flushing and closing once`, async () => {
       const { manager, checkpoint } = fixture()
       const question = {
-        questionId: "q", question: "fixture?", groundTruth: "fixture",
-        questionType: "fixture", haystackSessionIds: [],
+        questionId: "q",
+        question: "fixture?",
+        groundTruth: "fixture",
+        questionType: "fixture",
+        haystackSessionIds: [],
       }
       manager.initQuestion(checkpoint, "q", "fixture-container", question)
       checkpoint.targetQuestionIds = ["q"]
@@ -134,11 +152,18 @@ describe("orchestrator provider cleanup", () => {
       await manager.flush(checkpoint.runId)
       const load = spyOn(LoCoMoBenchmark.prototype, "load").mockResolvedValue(undefined)
       const questions = spyOn(LoCoMoBenchmark.prototype, "getQuestions").mockReturnValue([question])
-      const initialize = spyOn(HermesLcmProvider.prototype, "initialize").mockResolvedValue(undefined)
-      const search = spyOn(HermesLcmProvider.prototype, "search").mockImplementation(async () => {
-        if (fails) throw new Error("fixture search failure")
-        return []
-      })
+      const initialize = spyOn(HermesLcmProvider.prototype, "initialize").mockResolvedValue(
+        undefined
+      )
+      const search = spyOn(HermesLcmProvider.prototype, "searchWithHealth").mockImplementation(
+        async () => {
+          if (fails) throw new Error("fixture search failure")
+          return {
+            results: [],
+            health: { degraded: false, degradedReason: null, timeout: false, coverage: null },
+          }
+        }
+      )
       const close = spyOn(HermesLcmProvider.prototype, "close").mockImplementation(() => {
         const saved = manager.load(checkpoint.runId)!
         expect(saved.questions.q!.phases.search.status).toBe(fails ? "failed" : "completed")
@@ -148,10 +173,14 @@ describe("orchestrator provider cleanup", () => {
         restore.push(() => mock.mockRestore())
       }
       const orchestrator = new Orchestrator()
-      ;(orchestrator as unknown as { checkpointManager: CheckpointManager }).checkpointManager = manager
+      ;(orchestrator as unknown as { checkpointManager: CheckpointManager }).checkpointManager =
+        manager
       const running = orchestrator.run({
-        provider: "hermes-lcm", benchmark: "locomo", judgeModel: "gpt-4o",
-        runId: checkpoint.runId, phases: ["search"],
+        provider: "hermes-lcm",
+        benchmark: "locomo",
+        judgeModel: "gpt-4o",
+        runId: checkpoint.runId,
+        phases: ["search"],
       })
       if (fails) await expect(running).rejects.toThrow("fixture search failure")
       else await running

@@ -130,6 +130,7 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
       hypothesis: answerPhase.hypothesis || "",
       groundTruth: question.groundTruth,
       searchResults: searchPhase.results || [],
+      recallHealth: searchPhase.recallHealth ?? null,
       searchDurationMs,
       answerDurationMs,
       totalDurationMs,
@@ -200,8 +201,7 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
     if (qCheckpoint.phases.evaluate.status !== "completed") continue
     const answerPhase = qCheckpoint.phases.answer
     if (answerPhase.promptTokens != null) allPromptTokens.push(answerPhase.promptTokens)
-    if (answerPhase.basePromptTokens != null)
-      allBasePromptTokens.push(answerPhase.basePromptTokens)
+    if (answerPhase.basePromptTokens != null) allBasePromptTokens.push(answerPhase.basePromptTokens)
     if (answerPhase.contextTokens != null) allContextTokens.push(answerPhase.contextTokens)
   }
 
@@ -265,6 +265,7 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
   }
 
   const result: BenchmarkResult = {
+    recallConfig: checkpoint.recallConfig ?? "UNKNOWN",
     provider: checkpoint.provider,
     benchmark: checkpoint.benchmark,
     runId: checkpoint.runId,

@@ -1156,6 +1156,7 @@ class Bridge:
             "provenance": provenance,
             "degraded": payload.get("degraded", False),
             "degraded_reason": payload.get("degraded_reason"),
+            "timeout": payload.get("timeout", False),
         }
 
     def resolve_exact_refs(self, req: dict[str, Any]) -> dict[str, Any]:
