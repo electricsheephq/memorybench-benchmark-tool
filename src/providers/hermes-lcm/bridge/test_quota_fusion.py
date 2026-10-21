@@ -280,7 +280,29 @@ def test_search_default_keeps_lcm_recall_and_skips_quota(monkeypatch: pytest.Mon
         },
         "degraded": False,
         "degraded_reason": None,
+        "timeout": False,
     }
+
+
+def test_search_propagates_true_product_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = types.ModuleType("hermes_lcm.tools")
+    tools.lcm_recall = lambda *_args, **_kwargs: json.dumps(
+        {
+            "hits": [],
+            "degraded": True,
+            "degraded_reason": "query timed out",
+            "timeout": True,
+        }
+    )
+    install_fake_hermes_modules(monkeypatch, tools)
+    monkeypatch.delenv("HERMES_MB_FUSION", raising=False)
+    instance = fixture_bridge(monkeypatch)
+
+    response = instance.search({"containerTag": "fixture", "query": "ordinary"})
+
+    assert response["timeout"] is True
+    assert response["degraded"] is True
+    assert response["degraded_reason"] == "query timed out"
 
 
 def test_search_quota_routes_canned_arms_and_emits_provenance(monkeypatch: pytest.MonkeyPatch) -> None:

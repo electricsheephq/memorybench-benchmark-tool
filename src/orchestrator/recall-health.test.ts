@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { mkdtempSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { CheckpointManager } from "./checkpoint"
 import { runSearchPhase } from "./phases/search"
@@ -27,7 +28,7 @@ const benchmark = {
   getQuestionTypes: () => ({}),
 } as unknown as Benchmark
 function setup() {
-  const root = mkdtempSync(join(process.env.TMPDIR!, "recall-health-"))
+  const root = mkdtempSync(join(tmpdir(), "recall-health-"))
   const manager = new CheckpointManager(root)
   const checkpoint = {
     runId: "fixture",
@@ -53,6 +54,45 @@ function setup() {
   } as RunCheckpoint
   return { root, manager, checkpoint }
 }
+
+test("resume leaves completed pre-feature searches UNKNOWN, even outside the target subset", async () => {
+  const { manager, checkpoint } = setup()
+  checkpoint.questions.q_abs!.phases.search = { status: "completed", results: [] }
+  await runSearchPhase({ recallConfig: "OFF" } as Provider, benchmark, checkpoint, manager, [])
+  await manager.flush()
+  expect(manager.load("fixture")!.recallConfig).toBe("UNKNOWN")
+  expect(generateReport(benchmark, checkpoint).recallConfig).toBe("UNKNOWN")
+})
+
+test("fresh searches use the current label when no completed results exist", async () => {
+  const { manager, checkpoint } = setup()
+  checkpoint.recallConfig = "LOCAL"
+  await runSearchPhase(
+    { recallConfig: "OFF", search: async () => [] } as unknown as Provider,
+    benchmark,
+    checkpoint,
+    manager
+  )
+  await manager.flush()
+  expect(manager.load("fixture")!.recallConfig).toBe("OFF")
+})
+
+test("mismatched resume marks retained and pending searches UNKNOWN", async () => {
+  const { manager, checkpoint } = setup()
+  checkpoint.recallConfig = "LOCAL"
+  checkpoint.questions.retained = structuredClone(checkpoint.questions.q_abs!)
+  checkpoint.questions.retained.questionId = "retained"
+  checkpoint.questions.retained.phases.search = { status: "completed", results: [] }
+  await runSearchPhase(
+    { recallConfig: "OFF", search: async () => [] } as unknown as Provider,
+    benchmark,
+    checkpoint,
+    manager
+  )
+  await manager.flush()
+  expect(manager.load("fixture")!.recallConfig).toBe("UNKNOWN")
+  expect(checkpoint.questions.q_abs!.phases.search.status).toBe("completed")
+})
 
 test("health-aware search persists identical health in result, checkpoint and report", async () => {
   const { manager, checkpoint } = setup()

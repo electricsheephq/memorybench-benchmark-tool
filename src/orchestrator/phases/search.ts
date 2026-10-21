@@ -15,10 +15,6 @@ export async function runSearchPhase(
   checkpointManager: CheckpointManager,
   questionIds?: string[]
 ): Promise<void> {
-  if (checkpoint.recallConfig === undefined) {
-    checkpoint.recallConfig = provider.recallConfig ?? "UNKNOWN"
-    checkpointManager.save(checkpoint)
-  }
   const questions = benchmark.getQuestions()
   const targetQuestions = questionIds
     ? questions.filter((q) => questionIds.includes(q.questionId))
@@ -29,6 +25,21 @@ export async function runSearchPhase(
     const indexingStatus = checkpointManager.getPhaseStatus(checkpoint, q.questionId, "indexing")
     return status !== "completed" && indexingStatus === "completed"
   })
+
+  const currentConfig = provider.recallConfig ?? "UNKNOWN"
+  const hasCompletedSearches = Object.values(checkpoint.questions).some(
+    (q) => q.phases.search.status === "completed"
+  )
+  // A run label must describe all retained results, including unselected questions.
+  if (!hasCompletedSearches) {
+    checkpoint.recallConfig = currentConfig
+  } else if (
+    checkpoint.recallConfig === undefined ||
+    (pendingQuestions.length > 0 && checkpoint.recallConfig !== currentConfig)
+  ) {
+    checkpoint.recallConfig = "UNKNOWN"
+  }
+  checkpointManager.save(checkpoint)
 
   if (pendingQuestions.length === 0) {
     logger.info("No questions pending search")
