@@ -267,8 +267,8 @@ test("orchestrator records fresh identities, rejects drift before provider init,
     const report = JSON.parse(readFileSync("./data/runs/synthetic/report.json", "utf8"));
     const keys = ${JSON.stringify(keys)};
     for (const key of keys) if (!saved[key] || report[key] !== saved[key]) throw new Error("fresh " + key);
-    if (saved.scoringPath !== "openai/default/score-v1") throw new Error("judge name");
-    for (const key of ["datasetSha256", "questionSetSha256", "promptVersion", "readerPromptVersion", "scoringPath"]) {
+    if (saved.scoringPath !== "openai:gpt-4o/default/score-v1") throw new Error("judge name");
+    for (const key of ["datasetSha256", "questionSetSha256", "promptVersion", "scoringPath", "answerPresentationMode"]) {
       writeFileSync(path, JSON.stringify({...saved, [key]: "changed"}));
       let refused = false;
       try { await runner.run(options); } catch (error) { refused = error.message.includes(key); }

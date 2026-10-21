@@ -33,11 +33,13 @@ const setup = `
   const source = ${source};
   globalThis.fetch = () => { throw new Error("network forbidden"); };
   let initialized = 0;
+  let readerPrompt = "original reader";
   const benchmark = {name:"locomo", datasetPath:"./synthetic.json", datasetSha256:"a".repeat(64),
     async load(){}, getQuestions:()=>[], getQuestionTypes:()=>({})};
   mock.module(source + "/src/benchmarks/index.ts", () => ({createBenchmark:()=>benchmark,
     getAvailableBenchmarks:()=>["locomo"]}));
   mock.module(source + "/src/providers/index.ts", () => ({createProvider:()=>({name:"filesystem",
+    prompts:{answerPrompt:()=>readerPrompt},
     async initialize(){initialized++}}), getAvailableProviders:()=>["filesystem"]}));
   mock.module(source + "/src/judges/index.ts", () => ({createJudge:()=>({async initialize(){}})}));
   mock.module(source + "/src/utils/config.ts", () => ({config:{},
@@ -89,13 +91,13 @@ for (const fromPhase of ["answer", "search", "indexing"]) {
         setup +
           `
         await runner.run(options);
-        if(read("source").scoringPath !== "anthropic/default/score-v1") throw new Error("source identity");
+        if(read("source").scoringPath !== "anthropic:claude-sonnet-4-5-20250929/default/score-v1") throw new Error("source identity");
         manager.copyCheckpoint("source","copy",${JSON.stringify(fromPhase)},{judge:"gpt-4o"});
         await manager.flush("copy");
         await runner.run({...options,runId:"copy",judgeModel:"gpt-4o",
           phases:getPhasesFromPhase(${JSON.stringify(fromPhase)})});
         const copied = read("copy");
-        if(copied.judge !== "gpt-4o" || copied.scoringPath !== "openai/default/score-v1" ||
+        if(copied.judge !== "gpt-4o" || copied.scoringPath !== "openai:gpt-4o/default/score-v1" ||
           copied.promptVersion !== read("source").promptVersion) throw new Error("copy identity not stamped");
         await refusesUnchanged("copy",["evaluate"],"scoringPath");
         manager.copyCheckpoint("source","no-override",${JSON.stringify(fromPhase)});
@@ -119,7 +121,7 @@ for (const command of ["search", "ingest"]) {
         process.env.HERMES_MB_LLM_CLI = "codex";
         await runner.run(options);
         const saved = read("source");
-        if(saved.scoringPath !== "cli/default/score-v1") throw new Error("CLI creation identity");
+        if(!saved.scoringPath.startsWith("cli:codex:")) throw new Error("CLI creation identity");
         delete process.env.HERMES_MB_LLM_CLI;
         const { ${command}Command } = await import(source + "/src/cli/commands/${command}.ts");
         await ${command}Command(["-r","source"]);
@@ -140,3 +142,112 @@ for (const command of ["search", "ingest"]) {
     ).toContain("CLI resume and scoring/data guards passed")
   })
 }
+
+for (const phase of ["report", "search", "ingest", "evaluate", "answer"]) {
+  test(`reader drift is checked only for answer: ${phase}`, () => {
+    expect(
+      probe(
+        setup +
+          `
+      await runner.run(options);
+      readerPrompt = "changed reader";
+      const phase = ${JSON.stringify(phase)};
+      if (phase === "answer") {
+        await refusesUnchanged("source",["answer"],"readerPromptVersion");
+      } else if (phase === "report") {
+        const { runCommand } = await import(source + "/src/cli/commands/run.ts");
+        await runCommand(["-r","source","-f","report"]);
+      } else {
+        await runner.run({...options,phases:[phase]});
+      }
+      console.log("reader phase guard passed");
+    `
+      )
+    ).toContain("reader phase guard passed")
+  })
+}
+
+for (const phase of ["answer", "evaluate", "report", "search"]) {
+  test(`presentation mode guard: ${phase}`, () => {
+    expect(
+      probe(
+        setup +
+          `
+      await runner.run(options);
+      writeFileSync(path("source"),JSON.stringify({...read("source"),answerPresentationMode:"other_v2"}));
+      const phase = ${JSON.stringify(phase)};
+      if (phase === "answer" || phase === "evaluate")
+        await refusesUnchanged("source",[phase],"answerPresentationMode");
+      else await runner.run({...options,phases:[phase]});
+      console.log("presentation phase guard passed");
+    `
+      )
+    ).toContain("presentation phase guard passed")
+  })
+}
+
+for (const legacy of [false, true]) {
+  test(`same-provider judge model guard, legacy=${legacy}`, () => {
+    expect(
+      probe(
+        setup +
+          `
+      options.judgeModel = "gpt-4o";
+      await runner.run(options);
+      if (${legacy}) writeFileSync(path("source"),JSON.stringify({
+        ...read("source"),scoringPath:"openai/default/score-v1"}));
+      await runner.run({...options,phases:["evaluate"]});
+      await refusesUnchanged("source",["evaluate"],"scoringPath","gpt-5");
+      await runner.run({...options,judgeModel:"gpt-5",phases:["report"]});
+      await runner.run({...options,judgeModel:"gpt-5",phases:["search"]});
+      console.log("judge model guard passed");
+    `
+      )
+    ).toContain("judge model guard passed")
+  })
+}
+
+test("resolved aliases share an identity and CLI uses its effective judge model", () => {
+  expect(
+    probe(
+      setup +
+        `
+    await runner.run(options);
+    await runner.run({...options,judgeModel:"claude-sonnet-4-5-20250929",phases:["evaluate"]});
+    process.env.HERMES_MB_LLM_CLI = "codex";
+    process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-a";
+    await runner.run({...options,runId:"cli"});
+    if (read("cli").scoringPath !== "cli:codex:cli-model-a/default/score-v1")
+      throw new Error("effective CLI model missing");
+    await runner.run({...options,runId:"cli",phases:["evaluate"]});
+    process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-b";
+    await refusesUnchanged("cli",["evaluate"],"scoringPath");
+    process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-a";
+    writeFileSync(path("cli"),JSON.stringify({...read("cli"),scoringPath:"cli/default/score-v1"}));
+    await runner.run({...options,runId:"cli",phases:["evaluate"]});
+    process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-b";
+    await refusesUnchanged("cli",["evaluate"],"scoringPath");
+    console.log("resolved model guard passed");
+  `
+    )
+  ).toContain("resolved model guard passed")
+})
+
+test("base checkpoints without identities keep accepting a changed judge", () => {
+  expect(
+    probe(
+      setup +
+        `
+    await runner.run(options);
+    const saved = read("source");
+    const keys = ["datasetPath","datasetSha256","questionSetSha256","readerPromptVersion",
+      "promptVersion","scoringPath","answerPresentationMode"];
+    for (const key of keys) delete saved[key];
+    writeFileSync(path("source"),JSON.stringify(saved));
+    await runner.run({...options,judgeModel:"gpt-5",phases:["evaluate"]});
+    if (keys.some(key => key in read("source"))) throw new Error("legacy identity backfill");
+    console.log("base compatibility passed");
+  `
+    )
+  ).toContain("base compatibility passed")
+})

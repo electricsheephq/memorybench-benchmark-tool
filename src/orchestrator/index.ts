@@ -163,7 +163,11 @@ export class Orchestrator {
     const benchmark = createBenchmark(benchmarkName)
     await benchmark.load()
     const provider = createProvider(providerName)
-    const identities = runIdentities(benchmark, provider, cliLlmBackend() ? "cli" : judgeName)
+    const cliJudge = cliLlmProvenance("judge")
+    const scoringJudge = cliJudge
+      ? `cli:${cliLlmBackend()}:${cliJudge.model}`
+      : `${judgeName}:${judgeModelInfo.id}`
+    const identities = runIdentities(benchmark, provider, scoringJudge)
 
     let checkpoint!: RunCheckpoint
     let effectiveLimit: number | undefined
@@ -202,7 +206,7 @@ export class Orchestrator {
       identities.questionSetSha256 = questionSetSha256(
         checkpoint.targetQuestionIds ?? allQuestions.map((q) => q.questionId)
       )
-      assertResumeIdentities(checkpoint, identities, phases.includes("evaluate"))
+      assertResumeIdentities(checkpoint, identities, phases)
       // Judge-overridden copies clear these fields. Stamp them when scoring
       // first resumes, while leaving legacy checkpoints without identities alone.
       if (phases.includes("evaluate") && checkpoint.datasetSha256 !== undefined) {

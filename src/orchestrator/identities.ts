@@ -7,6 +7,7 @@ import { buildJudgePrompt, SCORING_VERSION } from "../judges/base"
 import { LOCOMO_QUESTION_TYPES } from "../benchmarks/locomo"
 import { LONGMEMEVAL_QUESTION_TYPES } from "../benchmarks/longmemeval"
 import { CONVOMEM_QUESTION_TYPES } from "../benchmarks/convomem"
+import { resolveModel } from "../utils/models"
 import { buildAnswerPrompt } from "./phases/answer"
 
 export function relativeDatasetPath(datasetPath: string): string {
@@ -105,17 +106,36 @@ export function questionSetSha256(orderedIds: string[]): string {
 export function assertResumeIdentities(
   checkpoint: RunCheckpoint,
   current: RunIdentities,
-  scores = true
+  phases: readonly string[] = ["answer", "evaluate"]
 ): void {
+  const answers = phases.includes("answer")
+  const scores = phases.includes("evaluate")
   for (const key of [
     "datasetSha256",
     "questionSetSha256",
-    "promptVersion",
-    "readerPromptVersion",
-    "scoringPath",
+    ...(answers ? ["readerPromptVersion" as const] : []),
+    ...(scores ? ["promptVersion" as const, "scoringPath" as const] : []),
+    ...(answers || scores ? ["answerPresentationMode" as const] : []),
   ] as const) {
-    if (!scores && (key === "promptVersion" || key === "scoringPath")) continue
-    if (checkpoint[key] !== undefined && checkpoint[key] !== current[key]) {
+    let expected = current[key]
+    if (key === "scoringPath" && /^(openai|anthropic|google|cli)\//.test(checkpoint[key] ?? "")) {
+      // Round-2 identities lack the model. Compare the old path format, then
+      // use the recorded judge (or CLI provenance when known) to check the model.
+      const [judge, ...path] = expected.split("/")
+      const [provider, ...model] = judge!.split(":")
+      expected = `${provider}/${path.join("/")}`
+      const storedModel =
+        provider === "cli" ? checkpoint.judgeProvenance?.model : resolveModel(checkpoint.judge).id
+      const currentModel = provider === "cli" ? model.slice(1).join(":") : model.join(":")
+      const storedTransport = checkpoint.judgeProvenance?.transport
+      if (
+        (storedModel && storedModel !== currentModel) ||
+        (provider === "cli" && storedTransport && storedTransport !== `${model[0]}-cli`)
+      ) {
+        throw new Error("Resume refused: identity mismatch: scoringPath")
+      }
+    }
+    if (checkpoint[key] !== undefined && checkpoint[key] !== expected) {
       throw new Error(`Resume refused: identity mismatch: ${key}`)
     }
   }

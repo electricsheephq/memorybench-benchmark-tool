@@ -34,7 +34,7 @@ export async function emitIdentityFixture(output: string, byte = "A"): Promise<v
     "fixture-judge",
     "fixture-reader",
     {
-      identities: runIdentities(benchmark, { name: "fixture" }, "fixture-judge"),
+      identities: runIdentities(benchmark, { name: "fixture" }, "openai:fixture-judge"),
       targetQuestionIds: questions.map((q: { questionId: string }) => q.questionId),
     }
   )
