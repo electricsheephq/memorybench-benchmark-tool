@@ -59,6 +59,9 @@ _DEFAULT_MODELS = {
     "voyage": "voyage-context-3",
 }
 _DEFAULT_ANSWER_READY_CONTENT_CHARS = 2_400
+# Stored-message format of an ingest record; v2 stores speaker names as
+# "speaker: content". Records of an older format are refused on resume.
+_INGEST_FORMAT = "v2"
 
 # Preserve the real stdout for protocol responses, then redirect stdout to
 # stderr so any library chatter (model downloads, warnings) can never corrupt
@@ -498,11 +501,22 @@ class Bridge:
 
     def _ingested_path(self, container_tag: str) -> Path:
         # session_id -> store ids, written only after a session is fully ingested.
+        # The name carries the stored-message format; bump it when that changes.
+        return self.workdir / f"{_safe(container_tag)}.ingested.{_INGEST_FORMAT}.json"
+
+    def _legacy_ingested_path(self, container_tag: str) -> Path:
         return self.workdir / f"{_safe(container_tag)}.ingested.json"
 
     def _load_ingested(self, container_tag: str) -> dict[str, list[int]]:
         path = self._ingested_path(container_tag)
         if not path.exists():
+            # A container written before speaker names were stored must not be
+            # resumed: its sessions would keep the old content.
+            if self._legacy_ingested_path(container_tag).exists():
+                raise RuntimeError(
+                    f"container {container_tag!r} was ingested by an older bridge "
+                    "format; clear it or start from a fresh workdir"
+                )
             return {}
         # An unreadable record must stop the run: treating it as empty would
         # re-ingest every session and store each one twice.
@@ -1516,7 +1530,8 @@ class Bridge:
         # The ingest record goes first: a clear cut off part-way then leaves rows
         # without a record, which the next ingest refuses instead of trusting.
         record = self._ingested_path(container_tag)
-        for path in (record, record.with_suffix(".tmp")):
+        legacy = self._legacy_ingested_path(container_tag)
+        for path in (record, record.with_suffix(".tmp"), legacy, legacy.with_suffix(".tmp")):
             if path.exists():
                 path.unlink()
         db_path = self._db_path(container_tag)

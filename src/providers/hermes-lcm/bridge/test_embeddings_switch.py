@@ -251,6 +251,18 @@ def test_unreadable_completion_record_stops_the_run(make_bridge):
         instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
 
 
+def test_resume_refuses_a_container_from_the_older_format(make_bridge):
+    instance = make_bridge("off")
+    instance.initialize({})
+    legacy = instance.workdir / "old.ingested.json"
+    legacy.write_text('{"s1": [1]}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="older bridge format"):
+        instance.ingest({"containerTag": "old", "session": {"sessionId": "s1", "messages": []}})
+    assert not instance._db_path("old").exists()
+    assert instance.clear({"containerTag": "old"}) == {"ok": True}
+    assert not legacy.exists()
+
+
 @pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
 def test_resumed_ingest_never_stores_a_session_twice(make_bridge, monkeypatch):
     session, _queries = _short_conversation()
