@@ -19,6 +19,8 @@ import { runEvaluatePhase } from "./phases/evaluate"
 import { generateReport, saveReport, printReport } from "./phases/report"
 import { questionCheckpointMetadata, syncQuestionCheckpointMetadata } from "./question-metadata"
 import { cliLlmBackend, cliLlmProvenance } from "../utils/cli-llm"
+import { randomUUID } from "node:crypto"
+import { assertSafeHarnessModes } from "./mode-guard"
 
 export interface OrchestratorOptions {
   provider: ProviderName
@@ -105,6 +107,11 @@ export class Orchestrator {
   }
 
   async run(options: OrchestratorOptions): Promise<void> {
+    const resume = options.force ? undefined : this.checkpointManager.load(options.runId)
+    assertSafeHarnessModes(
+      resume, options.phases && !options.phases.includes("answer")
+        ? resume?.answeringModel : options.answeringModel
+    )
     const {
       provider: providerName,
       benchmark: benchmarkName,
@@ -163,7 +170,8 @@ export class Orchestrator {
         benchmarkName,
         judgeModel,
         answeringModel,
-        { limit, sampling, concurrency, status: "initializing" }
+        { limit, sampling, concurrency, status: "initializing",
+          dataSourceRunId: force ? `${runId}-force-${randomUUID()}` : undefined }
       )
       logger.info("Created checkpoint (initializing)")
     }
@@ -294,6 +302,7 @@ export class Orchestrator {
     this.checkpointManager.save(checkpoint)
 
     const provider = createProvider(providerName)
+    let primaryFailed = false
     try {
     await provider.initialize(getProviderConfig(providerName))
 
@@ -356,9 +365,17 @@ export class Orchestrator {
     }
 
     this.checkpointManager.updateStatus(checkpoint, "completed")
+    } catch (error) {
+      primaryFailed = true
+      throw error
     } finally {
       try {
-        await this.checkpointManager.flush(checkpoint.runId)
+        try {
+          await this.checkpointManager.flush(checkpoint.runId)
+        } catch (saveError) {
+          if (!primaryFailed) throw saveError
+          logger.error(`Checkpoint cleanup save failed separately: ${saveError}`)
+        }
       } finally {
         const closableProvider = provider as typeof provider & { close?: () => void | Promise<void> }
         if (typeof closableProvider.close === "function") await closableProvider.close()

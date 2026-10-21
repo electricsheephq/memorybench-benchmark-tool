@@ -21,6 +21,7 @@ import type {
 import type { ConcurrencyConfig } from "../types/concurrency"
 import { PHASE_ORDER } from "../types/checkpoint"
 import { logger } from "../utils/logger"
+import { assertSafeHarnessModes } from "./mode-guard"
 
 const RUNS_DIR = "./data/runs"
 
@@ -73,7 +74,12 @@ export class CheckpointManager {
           await new Promise<void>((resolve) => setImmediate(resolve))
           const latest = this.pendingSave.get(runId)!
           this.pendingSave.delete(runId)
-          await this._performSave(latest)
+          try {
+            await this._performSave(latest)
+          } catch (error) {
+            if (!this.pendingSave.has(runId)) this.pendingSave.set(runId, latest)
+            throw error
+          }
         }
       } finally {
         this.saveLock.delete(runId)
@@ -120,11 +126,11 @@ export class CheckpointManager {
   }
 
   async flush(runId?: string): Promise<void> {
-    if (runId) {
-      await this.saveLock.get(runId)
-    } else {
-      await Promise.all(Array.from(this.saveLock.values()))
-    }
+    const ids = runId ? [runId] : [...new Set([...this.saveLock.keys(), ...this.pendingSave.keys()])]
+    await Promise.all(ids.map(async (id) => {
+      if (!this.saveLock.has(id) && this.pendingSave.has(id)) this.save(this.pendingSave.get(id)!)
+      await this.saveLock.get(id)
+    }))
   }
 
   create(
@@ -314,6 +320,7 @@ export class CheckpointManager {
     fromPhase: PhaseId,
     overrides?: { judge?: string; answeringModel?: string }
   ): RunCheckpoint {
+    assertSafeHarnessModes(undefined, undefined, fromPhase)
     const source = this.load(sourceRunId)
     if (!source) {
       throw new Error(`Source checkpoint not found: ${sourceRunId}`)
