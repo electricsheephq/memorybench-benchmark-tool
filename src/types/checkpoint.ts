@@ -153,7 +153,9 @@ export interface CliLedgerSummary {
 }
 
 export interface RunIdentities extends DatasetIdentity {
+  questionSetSha256: string
   promptVersion: string
+  readerPromptVersion: string
   scoringPath: string
   answerPresentationMode: import("../prompts/evidence-cards").AnswerPresentationMode
 }

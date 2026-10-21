@@ -6,11 +6,10 @@ import { tmpdir } from "node:os"
 import { LoCoMoBenchmark } from "../benchmarks/locomo"
 import { LongMemEvalBenchmark } from "../benchmarks/longmemeval"
 import { ConvoMemBenchmark } from "../benchmarks/convomem"
-import { emitIdentityFixture } from "../../scripts/emit-identity-fixture"
+import { emitIdentityFixture } from "./identity-fixture"
 import { CheckpointManager } from "./checkpoint"
 import { generateReport } from "./phases/report"
 import { assertResumeIdentities, datasetIdentity, runIdentities } from "./identities"
-import * as prompts from "../prompts/defaults"
 
 const dirs: string[] = []
 function temp() {
@@ -24,13 +23,19 @@ afterEach(() => {
 const keys = [
   "datasetSha256",
   "datasetPath",
+  "questionSetSha256",
+  "readerPromptVersion",
   "promptVersion",
   "scoringPath",
   "answerPresentationMode",
 ] as const
 const identity = () =>
   runIdentities(
-    { name: "synthetic", ...datasetIdentity("./synthetic.json", Buffer.from("A")) } as any,
+    {
+      name: "synthetic",
+      ...datasetIdentity("./synthetic.json", Buffer.from("A")),
+      getQuestions: () => [],
+    } as any,
     { name: "fixture" },
     "judge"
   )
@@ -81,7 +86,7 @@ test("LongMemEval hashes and consumes raw source even when split cache is stale"
 test("first fetch bytes are hashed, and absolute dataset labels never serialize", async () => {
   const path = join(temp(), "fetched.json")
   const saved = globalThis.fetch
-  globalThis.fetch = (async () => new Response("[] ")) as typeof fetch
+  globalThis.fetch = (async () => new Response("[] ")) as unknown as typeof fetch
   try {
     const benchmark = new LoCoMoBenchmark()
     await benchmark.load({ dataPath: relative(process.cwd(), path) })
@@ -99,7 +104,7 @@ test("first fetch bytes are hashed, and absolute dataset labels never serialize"
   }
 })
 
-test("fresh checkpoint and report carry all five identities through the real writers", async () => {
+test("fresh checkpoint and report carry all identities through the real writers", async () => {
   const root = temp()
   for (const [run, byte] of [
     ["a", "A"],
@@ -124,35 +129,53 @@ test("fresh checkpoint and report carry all five identities through the real wri
   }
 })
 
-test("prompt constants use fixed export-name order, and a changed constant changes the key", () => {
-  const texts = Object.entries(prompts)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .filter(([, value]) => typeof value === "string")
-    .map(([, value]) => value)
-  expect(identity().promptVersion).toBe(
-    `sha256:${createHash("sha256").update(texts.join("")).digest("hex")}`
-  )
-  const result = Bun.spawnSync(
-    [
-      process.execPath,
-      "-e",
-      `
-    import { mock } from "bun:test";
-    const path = ${JSON.stringify(resolve("src/prompts/defaults.ts"))};
-    const prompts = await import(path);
-    mock.module(path, () => ({ ...prompts, DEFAULT_JUDGE_PROMPT: prompts.DEFAULT_JUDGE_PROMPT + "changed" }));
-    const { runIdentities } = await import(${JSON.stringify(resolve("src/orchestrator/identities.ts"))});
-    console.log(runIdentities({datasetPath:"./synthetic.json",datasetSha256:"unused"}, {name:"fixture"}, "judge").promptVersion);
-  `,
-    ],
-    { cwd: process.cwd(), env: process.env }
-  )
-  expect(result.exitCode).toBe(0)
-  expect(result.stdout.toString().trim()).not.toBe(identity().promptVersion)
-})
+for (const mutation of ["none", "wrapper", "routing", "answer"] as const) {
+  test(`rendered prompt identities track ${mutation} across processes`, () => {
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        `
+        import { mock } from "bun:test";
+        const source = ${JSON.stringify(process.cwd())};
+        const mutation = ${JSON.stringify(mutation)};
+        if (mutation === "wrapper") {
+          const base = await import(source + "/src/judges/base.ts");
+          const build = base.buildJudgePrompt;
+          mock.module(source + "/src/judges/base.ts", () => ({...base,
+            buildJudgePrompt: input => build(input) + "changed wrapper"}));
+        }
+        if (mutation === "routing" || mutation === "answer") {
+          const path = source + "/src/prompts/defaults.ts";
+          const defaults = await import(path);
+          const route = defaults.getJudgePromptForType;
+          mock.module(path, () => ({...defaults,
+            ...(mutation === "routing" ? {getJudgePromptForType: type =>
+              type === "temporal" ? defaults.DEFAULT_JUDGE_PROMPT : route(type)} :
+              {buildDefaultAnswerPrompt: () => "changed answer prompt"})}));
+        }
+        const { runIdentities } = await import(source + "/src/orchestrator/identities.ts");
+        console.log(JSON.stringify(runIdentities({datasetPath:"./synthetic.json",
+          datasetSha256:"unused",getQuestions:()=>[]}, {name:"fixture"}, "judge")));
+      `,
+      ],
+      { cwd: process.cwd(), env: process.env, timeout: 10000 }
+    )
+    if (result.exitCode) throw new Error(result.stderr.toString())
+    const actual = JSON.parse(result.stdout.toString())
+    const expected = identity()
+    expect(actual.promptVersion === expected.promptVersion).toBe(
+      mutation !== "wrapper" && mutation !== "routing"
+    )
+    expect(actual.readerPromptVersion === expected.readerPromptVersion).toBe(mutation !== "answer")
+  })
+}
 
 test("provider override source changes prompt identity and selects provider scoring path", () => {
-  const benchmark = { ...datasetIdentity("data.json", Buffer.from("[]")) } as any
+  const benchmark = {
+    ...datasetIdentity("data.json", Buffer.from("[]")),
+    getQuestions: () => [],
+  } as any
   const one = runIdentities(
     benchmark,
     { name: "custom", prompts: { judgePrompt: () => ({ default: "one" }) } },
@@ -169,7 +192,13 @@ test("provider override source changes prompt identity and selects provider scor
   expect(identity().scoringPath).toBe("judge/default/score-v1")
 })
 
-for (const key of ["datasetSha256", "promptVersion", "scoringPath"] as const) {
+for (const key of [
+  "datasetSha256",
+  "questionSetSha256",
+  "promptVersion",
+  "readerPromptVersion",
+  "scoringPath",
+] as const) {
   test(`resume mismatch refuses and names ${key} before run work`, async () => {
     const root = temp()
     const manager = new CheckpointManager(root)
@@ -239,7 +268,7 @@ test("orchestrator records fresh identities, rejects drift before provider init,
     const keys = ${JSON.stringify(keys)};
     for (const key of keys) if (!saved[key] || report[key] !== saved[key]) throw new Error("fresh " + key);
     if (saved.scoringPath !== "openai/default/score-v1") throw new Error("judge name");
-    for (const key of ["datasetSha256", "promptVersion", "scoringPath"]) {
+    for (const key of ["datasetSha256", "questionSetSha256", "promptVersion", "readerPromptVersion", "scoringPath"]) {
       writeFileSync(path, JSON.stringify({...saved, [key]: "changed"}));
       let refused = false;
       try { await runner.run(options); } catch (error) { refused = error.message.includes(key); }
@@ -268,4 +297,35 @@ test("orchestrator records fresh identities, rejects drift before provider init,
   if (result.exitCode) throw new Error(result.stderr.toString())
   expect(result.exitCode).toBe(0)
   expect(result.stdout.toString()).toContain("orchestrator identity integration passed")
+})
+
+test("rendered provider prompts detect closure changes and separate reader identity", () => {
+  const benchmark = {
+    ...datasetIdentity("data.json", Buffer.from("[]")),
+    getQuestions: () => [],
+  } as any
+  const provider = (text: string) => ({
+    name: "custom",
+    prompts: {
+      judgePrompt: () => ({ default: text }),
+      answerPrompt: () => text,
+    },
+  })
+  const one = runIdentities(benchmark, provider("one"), "judge")
+  const two = runIdentities(benchmark, provider("two"), "judge")
+  expect(one.promptVersion).not.toBe(two.promptVersion)
+  expect(one.readerPromptVersion).not.toBe(two.readerPromptVersion)
+  const readerOnly = runIdentities(
+    benchmark,
+    {
+      ...provider("one"),
+      prompts: {
+        ...provider("one").prompts,
+        answerPrompt: "{{question}} {{context}} changed",
+      },
+    },
+    "judge"
+  )
+  expect(readerOnly.promptVersion).toBe(one.promptVersion)
+  expect(readerOnly.readerPromptVersion).not.toBe(one.readerPromptVersion)
 })

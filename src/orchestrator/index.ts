@@ -1,4 +1,4 @@
-import { runIdentities, assertResumeIdentities } from "./identities"
+import { runIdentities, assertResumeIdentities, questionSetSha256 } from "./identities"
 import type { ProviderName } from "../types/provider"
 import type { BenchmarkName } from "../types/benchmark"
 import type { JudgeName } from "../types/judge"
@@ -194,6 +194,14 @@ export class Orchestrator {
 
     if (this.checkpointManager.exists(runId) && !isNewRun) {
       checkpoint = this.checkpointManager.load(runId)!
+      // The stored ordered selection is authoritative on resume, including random
+      // samples and explicit ids. Never re-sample or silently lose missing targets.
+      if (checkpoint.questionSetSha256 !== undefined && checkpoint.targetQuestionIds) {
+        validateExplicitQuestionIds(allQuestions, checkpoint.targetQuestionIds)
+      }
+      identities.questionSetSha256 = questionSetSha256(
+        checkpoint.targetQuestionIds ?? allQuestions.map((q) => q.questionId)
+      )
       assertResumeIdentities(checkpoint, identities)
 
       effectiveLimit = checkpoint.limit
@@ -280,6 +288,7 @@ export class Orchestrator {
         targetQuestionIds = allQuestions.slice(0, effectiveLimit).map((q) => q.questionId)
       } else {
         logger.info(`No sampling/limit specified, using all ${allQuestions.length} questions`)
+        targetQuestionIds = allQuestions.map((q) => q.questionId)
       }
 
       checkpoint.targetQuestionIds = targetQuestionIds
@@ -288,6 +297,8 @@ export class Orchestrator {
       const questionsToInit = targetQuestionIds
         ? allQuestions.filter((q) => targetQuestionIds!.includes(q.questionId))
         : allQuestions
+
+      checkpoint.questionSetSha256 = questionSetSha256(targetQuestionIds!)
 
       for (const q of questionsToInit) {
         const containerTag = `${q.questionId}-${checkpoint.dataSourceRunId}`
@@ -402,7 +413,10 @@ export class Orchestrator {
   ): Promise<void> {
     await this.run({
       ...options,
-      judgeModel: options.judgeModel || "gpt-4o",
+      judgeModel:
+        options.judgeModel ||
+        (!options.force && this.checkpointManager.load(options.runId)?.judge) ||
+        "gpt-4o",
       phases: ["ingest", "indexing"],
     })
   }
@@ -410,7 +424,14 @@ export class Orchestrator {
   async search(
     options: Omit<OrchestratorOptions, "judgeModel" | "phases"> & { judgeModel?: string }
   ): Promise<void> {
-    await this.run({ ...options, judgeModel: options.judgeModel || "gpt-4o", phases: ["search"] })
+    await this.run({
+      ...options,
+      judgeModel:
+        options.judgeModel ||
+        (!options.force && this.checkpointManager.load(options.runId)?.judge) ||
+        "gpt-4o",
+      phases: ["search"],
+    })
   }
 
   async evaluate(options: OrchestratorOptions): Promise<void> {
