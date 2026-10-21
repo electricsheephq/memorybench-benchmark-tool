@@ -269,6 +269,8 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
     datasetSha256: checkpoint.datasetSha256,
     datasetPath: checkpoint.datasetPath,
     questionSetSha256: checkpoint.questionSetSha256,
+    normalizedInputsSha256: checkpoint.normalizedInputsSha256,
+    loaderOrderSha256: checkpoint.loaderOrderSha256,
     promptVersion: checkpoint.promptVersion,
     readerPromptVersion: checkpoint.readerPromptVersion,
     scoringPath: checkpoint.scoringPath,

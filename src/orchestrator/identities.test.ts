@@ -24,6 +24,8 @@ const keys = [
   "datasetSha256",
   "datasetPath",
   "questionSetSha256",
+  "normalizedInputsSha256",
+  "loaderOrderSha256",
   "readerPromptVersion",
   "promptVersion",
   "scoringPath",
@@ -195,6 +197,8 @@ test("provider override source changes prompt identity and selects provider scor
 for (const key of [
   "datasetSha256",
   "questionSetSha256",
+  "normalizedInputsSha256",
+  "loaderOrderSha256",
   "promptVersion",
   "readerPromptVersion",
   "scoringPath",

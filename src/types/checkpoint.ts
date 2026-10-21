@@ -153,6 +153,8 @@ export interface CliLedgerSummary {
 }
 
 export interface RunIdentities extends DatasetIdentity {
+  normalizedInputsSha256: string
+  loaderOrderSha256: string
   questionSetSha256: string
   promptVersion: string
   readerPromptVersion: string

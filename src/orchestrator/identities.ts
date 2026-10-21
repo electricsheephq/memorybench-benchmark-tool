@@ -9,6 +9,7 @@ import { LONGMEMEVAL_QUESTION_TYPES } from "../benchmarks/longmemeval"
 import { CONVOMEM_QUESTION_TYPES } from "../benchmarks/convomem"
 import { resolveModel } from "../utils/models"
 import { buildAnswerPrompt } from "./phases/answer"
+import { cliLlmProvenance } from "../utils/cli-llm"
 
 export function relativeDatasetPath(datasetPath: string): string {
   if (isAbsolute(datasetPath) || win32.isAbsolute(datasetPath)) {
@@ -81,16 +82,60 @@ export function runIdentities(
     predicate: "PREDICATE",
     object: "OBJECT",
   }
-  const readerPrompts = [undefined, "2000-01-01"].map((date) =>
-    buildAnswerPrompt("QUESTION", [context], date, provider)
+  // Shared fixed branch matrix, rendered separately through each provider:
+  // empty/full/sparse context; scalar/list question; absent/present date.
+  // Full hits cover Cortex triples, Zep edges and Supermemory array chunks;
+  // sparse hits cover text fallbacks, Zep nodes and singular/no chunks.
+  const contexts = [
+    [],
+    [context],
+    [{ content: "CONTENT", memory: "MEMORY", fact: "FACT", chunk: "CHUNK" }],
+    [{ _type: "node", name: "ENTITY", summary: "SUMMARY" }],
+    [{ text: "TEXT", metadata: {} }],
+    [{ fact: "FACT", metadata: { date: "2000-01-01" } }],
+    [{ content: "CONTENT", metadata: { timestamp: "2000-01-01" } }],
+    [
+      {
+        subject: ["SUBJECT", null],
+        predicate: 1,
+        object: { value: true },
+        metadata: { session_date: "2000-01-01" },
+      },
+    ],
+    [{ memory: "MEMORY", metadata: { temporalContext: { eventDate: ["2000-01-01"] } } }],
+  ]
+  const readerPrompts = ["QUESTION", "List all items"].flatMap((question) =>
+    contexts.flatMap((hits) =>
+      [undefined, "2000-01-01"].map((date) =>
+        buildAnswerPrompt(
+          question,
+          hits.map((hit) => ({
+            score: 1,
+            vectorScore: 1,
+            bm25Score: 1,
+            sessionId: "SESSION",
+            ...hit,
+          })),
+          date,
+          provider
+        )
+      )
+    )
   )
+  const questions = benchmark.getQuestions()
+  const normalizedInputs = [...questions]
+    .sort((a, b) => a.questionId.localeCompare(b.questionId))
+    .map((question) => ({ question, sessions: benchmark.getHaystackSessions(question.questionId) }))
+  const cliJudge = judge.startsWith("cli:") ? cliLlmProvenance("judge") : null
   return {
     datasetPath: benchmark.datasetPath,
     datasetSha256: benchmark.datasetSha256,
-    questionSetSha256: questionSetSha256(benchmark.getQuestions().map((q) => q.questionId)),
+    questionSetSha256: questionSetSha256(questions.map((q) => q.questionId)),
+    normalizedInputsSha256: hashJson(normalizedInputs),
+    loaderOrderSha256: questionSetSha256(questions.map((q) => q.questionId)),
     promptVersion: `sha256:${hashJson(judgePrompts)}`,
     readerPromptVersion: `sha256:${hashJson(readerPrompts)}`,
-    scoringPath: `${judge}/${override ? `provider:${provider.name}` : "default"}/${SCORING_VERSION}`,
+    scoringPath: `${judge}/${override ? `provider:${provider.name}` : "default"}/${SCORING_VERSION}${cliJudge ? `/cli-sha256:${hashJson(cliJudge)}` : ""}`,
     answerPresentationMode: "raw_json_v1",
   }
 }
@@ -113,6 +158,8 @@ export function assertResumeIdentities(
   for (const key of [
     "datasetSha256",
     "questionSetSha256",
+    "normalizedInputsSha256",
+    "loaderOrderSha256",
     ...(answers ? ["readerPromptVersion" as const] : []),
     ...(scores ? ["promptVersion" as const, "scoringPath" as const] : []),
     ...(answers || scores ? ["answerPresentationMode" as const] : []),
