@@ -1,3 +1,4 @@
+import type { RecallHealth, RecallConfig } from "./provider"
 import type { CliLedgerSummary, LlmExecutionProvenance } from "./checkpoint"
 
 export interface QuestionTypeInfo {
@@ -55,6 +56,7 @@ export interface RetrievalAggregates {
 }
 
 export interface EvaluationResult {
+  recallHealth?: RecallHealth | null
   questionId: string
   questionType: string
   question: string
@@ -103,6 +105,7 @@ export interface TokenMetrics {
 }
 
 export interface BenchmarkResult {
+  recallConfig?: RecallConfig
   provider: string
   benchmark: string
   runId: string

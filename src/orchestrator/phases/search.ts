@@ -15,6 +15,10 @@ export async function runSearchPhase(
   checkpointManager: CheckpointManager,
   questionIds?: string[]
 ): Promise<void> {
+  if (checkpoint.recallConfig === undefined) {
+    checkpoint.recallConfig = provider.recallConfig ?? "UNKNOWN"
+    checkpointManager.save(checkpoint)
+  }
   const questions = benchmark.getQuestions()
   const targetQuestions = questionIds
     ? questions.filter((q) => questionIds.includes(q.questionId))
@@ -55,11 +59,14 @@ export async function runSearchPhase(
       })
 
       try {
-        const results = await provider.search(question.question, {
+        const options = {
           containerTag,
           limit: 25,
           threshold: 0.3,
-        })
+        }
+        const { results, health: recallHealth } = provider.searchWithHealth
+          ? await provider.searchWithHealth(question.question, options)
+          : { results: await provider.search(question.question, options), health: null }
 
         const durationMs = Date.now() - startTime
         const resultFile = join(resultsDir, `${question.questionId}.json`)
@@ -72,6 +79,7 @@ export async function runSearchPhase(
           timestamp: new Date().toISOString(),
           durationMs,
           results,
+          recallHealth,
         }
 
         writeFileSync(resultFile, JSON.stringify(resultData, null, 2))
@@ -81,6 +89,7 @@ export async function runSearchPhase(
           error: undefined,
           resultFile,
           results,
+          recallHealth,
           completedAt: new Date().toISOString(),
           durationMs,
         })
