@@ -167,7 +167,12 @@ export class Orchestrator {
     const scoringJudge = cliJudge
       ? `cli:${cliLlmBackend()}:${cliJudge.model}`
       : `${judgeName}:${judgeModelInfo.id}`
-    const identities = runIdentities(benchmark, provider, scoringJudge)
+    const identities = runIdentities(
+      benchmark,
+      provider,
+      scoringJudge,
+      /^sha256:/.test(resume?.readerPromptVersion ?? "")
+    )
 
     let checkpoint!: RunCheckpoint
     let effectiveLimit: number | undefined

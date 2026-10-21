@@ -80,7 +80,7 @@ test("every registered provider renders both identities stably across two proces
     for(const name of getAvailableProviders()) {
       const value = runIdentities(benchmark,createProvider(name),"openai");
       for(const field of ["promptVersion","readerPromptVersion"])
-        if(!/^sha256:[a-f0-9]{64}$/.test(value[field])) throw new Error(name + ": " + field);
+        if(!(field === "readerPromptVersion" ? /^rpv2:sha256:[a-f0-9]{64}$/ : /^sha256:[a-f0-9]{64}$/).test(value[field])) throw new Error(name + ": " + field);
       identities[name] = value;
     }
     console.log(JSON.stringify(identities));
