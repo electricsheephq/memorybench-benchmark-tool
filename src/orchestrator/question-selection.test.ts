@@ -21,7 +21,7 @@ test("checkpoint/report hash ordered selections and refuse changed ids before pr
         groundTruth:"Synthetic", haystackSessionIds:[]}));
       mock.module(source + "/src/benchmarks/index.ts", () => ({createBenchmark:()=>({
         name:"longmemeval",datasetPath:"./synthetic.json",datasetSha256:"a".repeat(64),
-        async load(){},getQuestions:()=>questions,getQuestionTypes:()=>({})})}));
+        async load(){},getQuestions:()=>questions,getHaystackSessions:()=>[],getQuestionTypes:()=>({})})}));
       mock.module(source + "/src/providers/index.ts", () => ({createProvider:()=>({name:"fixture",
         async initialize(){initialized++}})}));
       mock.module(source + "/src/utils/config.ts", () => ({config:{},

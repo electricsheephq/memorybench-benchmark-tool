@@ -34,12 +34,19 @@ const setup = `
   globalThis.fetch = () => { throw new Error("network forbidden"); };
   let initialized = 0;
   let readerPrompt = "original reader";
+  let branchPrompt = "";
+  let questions = [];
+  let sessions = [];
+  const q = id => ({questionId:id,question:"Synthetic",groundTruth:"A",
+    questionType:"single-hop",haystackSessionIds:[]});
   const benchmark = {name:"locomo", datasetPath:"./synthetic.json", datasetSha256:"a".repeat(64),
-    async load(){}, getQuestions:()=>[], getQuestionTypes:()=>({})};
+    async load(){}, getQuestions:()=>questions, getHaystackSessions:()=>sessions,
+    getGroundTruth:id=>questions.find(q=>q.questionId===id)?.groundTruth, getQuestionTypes:()=>({})};
   mock.module(source + "/src/benchmarks/index.ts", () => ({createBenchmark:()=>benchmark,
     getAvailableBenchmarks:()=>["locomo"]}));
   mock.module(source + "/src/providers/index.ts", () => ({createProvider:()=>({name:"filesystem",
-    prompts:{answerPrompt:()=>readerPrompt},
+    prompts:{answerPrompt:(question,context)=>readerPrompt +
+      ((!context.length || question.includes("List")) ? branchPrompt : "")},
     async initialize(){initialized++}}), getAvailableProviders:()=>["filesystem"]}));
   mock.module(source + "/src/judges/index.ts", () => ({createJudge:()=>({async initialize(){}})}));
   mock.module(source + "/src/utils/config.ts", () => ({config:{},
@@ -73,7 +80,7 @@ test("every registered provider renders both identities stably across two proces
     for(const name of getAvailableProviders()) {
       const value = runIdentities(benchmark,createProvider(name),"openai");
       for(const field of ["promptVersion","readerPromptVersion"])
-        if(!/^sha256:[a-f0-9]{64}$/.test(value[field])) throw new Error(name + ": " + field);
+        if(!(field === "readerPromptVersion" ? /^rpv2:sha256:[a-f0-9]{64}$/ : /^sha256:[a-f0-9]{64}$/).test(value[field])) throw new Error(name + ": " + field);
       identities[name] = value;
     }
     console.log(JSON.stringify(identities));
@@ -217,14 +224,16 @@ test("resolved aliases share an identity and CLI uses its effective judge model"
     process.env.HERMES_MB_LLM_CLI = "codex";
     process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-a";
     await runner.run({...options,runId:"cli"});
-    if (read("cli").scoringPath !== "cli:codex:cli-model-a/default/score-v1")
+    if (!read("cli").scoringPath.startsWith("cli:codex:cli-model-a/default/score-v1/cli-sha256:"))
       throw new Error("effective CLI model missing");
     await runner.run({...options,runId:"cli",phases:["evaluate"]});
     process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-b";
     await refusesUnchanged("cli",["evaluate"],"scoringPath");
     process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-a";
     writeFileSync(path("cli"),JSON.stringify({...read("cli"),scoringPath:"cli/default/score-v1"}));
-    await runner.run({...options,runId:"cli",phases:["evaluate"]});
+    await refusesUnchanged("cli",["evaluate"],"scoringPath");
+    await runner.run({...options,runId:"cli",phases:["report"]});
+    await runner.run({...options,runId:"cli",phases:["search"]});
     process.env.HERMES_MB_CODEX_JUDGE_MODEL = "cli-model-b";
     await refusesUnchanged("cli",["evaluate"],"scoringPath");
     console.log("resolved model guard passed");
@@ -251,3 +260,100 @@ test("base checkpoints without identities keep accepting a changed judge", () =>
     )
   ).toContain("base compatibility passed")
 })
+
+for (const branch of ["empty", "enumeration"]) {
+  test(`#1770 reader branch-only drift refuses answer: ${branch}`, () => {
+    expect(
+      probe(
+        setup +
+          `
+      const providerModule = await import(source + "/src/providers/index.ts");
+      const original = providerModule.createProvider;
+      mock.module(source + "/src/providers/index.ts", () => ({createProvider:()=>({
+        ...original(), prompts:{answerPrompt:(question,context)=>readerPrompt +
+          ((${JSON.stringify(branch)} === "empty" ? !context.length : question.includes("List")) ? branchPrompt : "")}
+      })}));
+      await runner.run(options);
+      await runner.run({...options,phases:["answer"]});
+      branchPrompt = "changed branch";
+      await refusesUnchanged("source",["answer"],"readerPromptVersion");
+      await runner.run({...options,phases:["report"]});
+      await runner.run({...options,phases:["search"]});
+      console.log("branch guard passed");
+    `
+      )
+    ).toContain("branch guard passed")
+  })
+}
+
+for (const input of ["question", "groundTruth", "session"]) {
+  test(`#1770 normalized ${input} drift refuses unchanged bytes and ids`, () => {
+    expect(
+      probe(
+        setup +
+          `
+      questions = [q("q1")];
+      sessions = [{sessionId:"s1",messages:[{role:"user",content:"Synthetic A"}]}];
+      options.phases = [];
+      await runner.run(options);
+      await runner.run(options);
+      if (${JSON.stringify(input)} === "session") sessions[0].messages[0].content = "Synthetic B";
+      else questions[0][${JSON.stringify(input)}] = "B";
+      await refusesUnchanged("source",[],"normalizedInputsSha256");
+      console.log("normalization guard passed");
+    `
+      )
+    ).toContain("normalization guard passed")
+  })
+}
+
+test("#1770 changed loader order refuses before provider initialization", () => {
+  expect(
+    probe(
+      setup +
+        `
+    questions = [q("q1"),q("q2")];
+    options.phases = [];
+    options.questionIds = ["q2","q1"];
+    await runner.run(options);
+    await runner.run(options);
+    questions.reverse();
+    await refusesUnchanged("source",[],"loaderOrderSha256");
+    console.log("order guard passed");
+  `
+    )
+  ).toContain("order guard passed")
+})
+
+for (const setting of [
+  "HERMES_MB_CODEX_JUDGE_EFFORT",
+  "HERMES_MB_CODEX_SERVICE_TIER",
+  "HERMES_MB_CODEX_PROVIDER",
+]) {
+  test(`#1770 CLI judge ${setting} drift refuses evaluate`, () => {
+    expect(
+      probe(
+        setup +
+          `
+      process.env.HERMES_MB_LLM_CLI = "codex";
+      process.env.HERMES_MB_CODEX_JUDGE_MODEL = "synthetic-model";
+      process.env.HERMES_MB_CODEX_JUDGE_EFFORT = "low";
+      process.env.HERMES_MB_CODEX_SERVICE_TIER = "priority";
+      process.env.HERMES_MB_CODEX_PROVIDER = "openai";
+      await runner.run(options);
+      await runner.run({...options,phases:["evaluate"]});
+      process.env[${JSON.stringify(setting)}] = ${JSON.stringify(setting.endsWith("EFFORT") ? "high" : setting.endsWith("TIER") ? "flex" : "synthetic-provider")};
+      await refusesUnchanged("source",["evaluate"],"scoringPath");
+      await runner.run({...options,phases:["search"]});
+      const saved = read("source");
+      saved.scoringPath = "cli:codex:synthetic-model/default/score-v1";
+      delete saved.judgeProvenance;
+      writeFileSync(path("source"),JSON.stringify(saved));
+      await runner.run({...options,phases:["report"]});
+      await runner.run({...options,phases:["search"]});
+      console.log("CLI settings guard passed");
+    `
+      )
+    ).toContain("CLI settings guard passed")
+  })
+}

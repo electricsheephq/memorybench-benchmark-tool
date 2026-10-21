@@ -379,6 +379,8 @@ export class CheckpointManager {
       datasetSha256: source.datasetSha256,
       datasetPath: source.datasetPath,
       questionSetSha256: source.questionSetSha256,
+      normalizedInputsSha256: source.normalizedInputsSha256,
+      loaderOrderSha256: source.loaderOrderSha256,
       promptVersion: overrides?.judge ? undefined : source.promptVersion,
       readerPromptVersion: source.readerPromptVersion,
       scoringPath: overrides?.judge ? undefined : source.scoringPath,

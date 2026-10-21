@@ -3,12 +3,14 @@ import { isAbsolute, win32 } from "node:path"
 import type { Benchmark, DatasetIdentity } from "../types/benchmark"
 import type { RunCheckpoint, RunIdentities } from "../types/checkpoint"
 import type { Provider } from "../types/provider"
+import type { UnifiedSession } from "../types/unified"
 import { buildJudgePrompt, SCORING_VERSION } from "../judges/base"
 import { LOCOMO_QUESTION_TYPES } from "../benchmarks/locomo"
 import { LONGMEMEVAL_QUESTION_TYPES } from "../benchmarks/longmemeval"
 import { CONVOMEM_QUESTION_TYPES } from "../benchmarks/convomem"
 import { resolveModel } from "../utils/models"
 import { buildAnswerPrompt } from "./phases/answer"
+import { cliLlmProvenance } from "../utils/cli-llm"
 
 export function relativeDatasetPath(datasetPath: string): string {
   if (isAbsolute(datasetPath) || win32.isAbsolute(datasetPath)) {
@@ -27,7 +29,8 @@ export function datasetIdentity(datasetPath: string, bytes: Uint8Array): Dataset
 export function runIdentities(
   benchmark: Benchmark,
   provider: Pick<Provider, "name" | "prompts">,
-  judge: string
+  judge: string,
+  legacyReader = false
 ): RunIdentities {
   if (!benchmark.datasetPath || !benchmark.datasetSha256)
     throw new Error("Dataset identity not loaded")
@@ -81,18 +84,149 @@ export function runIdentities(
     predicate: "PREDICATE",
     object: "OBJECT",
   }
-  const readerPrompts = [undefined, "2000-01-01"].map((date) =>
-    buildAnswerPrompt("QUESTION", [context], date, provider)
+  // Keep the legacy two-render context frozen; tagged probes distinguish precedence.
+  const taggedContext = {
+    ...context,
+    text: "TEXT",
+    valid_at: "2000-01-07",
+    metadata: {
+      ...context.metadata,
+      timestamp: "2000-01-02",
+      event_date: "2000-01-03",
+      session_date: "2000-01-04",
+      temporalContext: { documentDate: "2000-01-05", eventDate: "2000-01-06" },
+    },
+  }
+  // Shared fixed branch matrix, rendered separately through each provider:
+  // empty/full/sparse context; scalar/list question; absent/present date.
+  // Full hits cover Cortex triples, Zep edges and Supermemory array chunks;
+  // sparse hits cover text fallbacks, Zep nodes and singular/no chunks.
+  const contexts: Record<string, unknown>[][] = [
+    [],
+    [taggedContext],
+    [{ content: "CONTENT", memory: "MEMORY", fact: "FACT", text: "TEXT", chunk: "CHUNK" }],
+    [{ _type: "node", name: "ENTITY", summary: "SUMMARY" }],
+    [{ text: "TEXT", metadata: {} }],
+    [{ fact: "FACT", metadata: { date: "2000-01-01" } }],
+    [{ content: "CONTENT", metadata: { timestamp: "2000-01-01" } }],
+    [
+      {
+        subject: ["SUBJECT", null],
+        predicate: 1,
+        object: { value: true },
+        metadata: { session_date: "2000-01-01" },
+      },
+    ],
+    [{ memory: "MEMORY", metadata: { temporalContext: { eventDate: ["2000-01-01"] } } }],
+    ...missingFieldInputs(taggedContext).map((hit) => [hit]),
+    ...missingFieldInputs({ _type: "node", name: "ENTITY", summary: "SUMMARY" }).map((hit) => [
+      hit,
+    ]),
+    ...missingFieldInputs({
+      chunks: [
+        { content: "LATER", position: 2 },
+        { content: "EARLIER", position: 1 },
+        { content: "LATER", position: 2 },
+      ],
+    }).map((hit) => [hit]),
+    [taggedContext, taggedContext],
+  ]
+  const readerPrompts = [
+    "QUESTION",
+    "List all items",
+    "all items",
+    "list items",
+    "which items",
+    "what were the different items",
+    "name every item",
+    "name all",
+    "what are the items",
+  ].flatMap((question) =>
+    contexts.flatMap((hits) =>
+      [undefined, "2000-01-01"].map((date) =>
+        buildAnswerPrompt(
+          question,
+          hits.map((hit) => ({
+            score: 1,
+            vectorScore: 1,
+            bm25Score: 1,
+            sessionId: "SESSION",
+            ...hit,
+          })),
+          date,
+          provider
+        )
+      )
+    )
   )
+  const questions = benchmark.getQuestions()
+  const sessions = new Map<string, Set<string>>()
+  const serializedSessions = new WeakMap<UnifiedSession, string>()
+  const questionSessions = [...questions]
+    .sort((a, b) => a.questionId.localeCompare(b.questionId))
+    .map((question) => ({
+      question,
+      sessions: benchmark.getHaystackSessions(question.questionId).map((session) => {
+        const content = serializedSessions.get(session) ?? JSON.stringify(session)
+        serializedSessions.set(session, content)
+        const variants = sessions.get(session.sessionId) ?? new Set<string>()
+        variants.add(content)
+        sessions.set(session.sessionId, variants)
+        return [session.sessionId, content] as const
+      }),
+    }))
+  const normalizedInputs = questionSessions.map(({ question, sessions: refs }) => ({
+    question,
+    sessions: refs.map(([id, content]) => {
+      const variants = [...sessions.get(id)!]
+      return variants.length === 1 ? id : `${id}#${variants.indexOf(content)}`
+    }),
+  }))
+  // Sort ids as before; retain distinct content in first-seen question order.
+  // Reuse serialized session JSON so shared objects are read only once, while
+  // preserving the exact previous JSON bytes for datasets without conflicting ids.
+  const sessionEntries = [...sessions]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([id, variants]) => [...variants].map((content) => `[${JSON.stringify(id)},${content}]`))
+  const normalizedInputsSha256 = createHash("sha256")
+    .update(`{"questions":${JSON.stringify(normalizedInputs)},"sessions":[${sessionEntries.join(",")}]}`)
+    .digest("hex")
+  const cliJudge = judge.startsWith("cli:") ? cliLlmProvenance("judge") : null
   return {
     datasetPath: benchmark.datasetPath,
     datasetSha256: benchmark.datasetSha256,
-    questionSetSha256: questionSetSha256(benchmark.getQuestions().map((q) => q.questionId)),
+    questionSetSha256: questionSetSha256(questions.map((q) => q.questionId)),
+    normalizedInputsSha256,
+    loaderOrderSha256: questionSetSha256(questions.map((q) => q.questionId)),
     promptVersion: `sha256:${hashJson(judgePrompts)}`,
-    readerPromptVersion: `sha256:${hashJson(readerPrompts)}`,
-    scoringPath: `${judge}/${override ? `provider:${provider.name}` : "default"}/${SCORING_VERSION}`,
+    readerPromptVersion: legacyReader
+      ? `sha256:${hashJson([undefined, "2000-01-01"].map((date) => buildAnswerPrompt("QUESTION", [context], date, provider)))}`
+      : `rpv2:sha256:${hashJson(readerPrompts)}`,
+    scoringPath: `${judge}/${override ? `provider:${provider.name}` : "default"}/${SCORING_VERSION}${cliJudge ? `/cli-sha256:${hashJson(cliJudge)}` : ""}`,
     answerPresentationMode: "raw_json_v1",
   }
+}
+
+// Remove each optional field once, including nested metadata and chunk fields.
+// Required numeric RAG fields remain renderable in every generated input.
+function missingFieldInputs(input: Record<string, unknown>): Record<string, unknown>[] {
+  return Object.entries(input).flatMap(([key, value]) => {
+    const absent = { ...input }
+    delete absent[key]
+    const variants = [absent]
+    if (value && typeof value === "object") {
+      const entries = Array.isArray(value) ? value : [value]
+      entries.forEach((entry, index) => {
+        if (!entry || typeof entry !== "object") return
+        for (const nested of missingFieldInputs(entry)) {
+          const replacement = [...entries]
+          replacement[index] = nested
+          variants.push({ ...input, [key]: Array.isArray(value) ? replacement : nested })
+        }
+      })
+    }
+    return ["score", "vectorScore", "bm25Score", "sessionId"].includes(key) ? [] : variants
+  })
 }
 
 function hashJson(value: unknown): string {
@@ -113,6 +247,8 @@ export function assertResumeIdentities(
   for (const key of [
     "datasetSha256",
     "questionSetSha256",
+    "normalizedInputsSha256",
+    "loaderOrderSha256",
     ...(answers ? ["readerPromptVersion" as const] : []),
     ...(scores ? ["promptVersion" as const, "scoringPath" as const] : []),
     ...(answers || scores ? ["answerPresentationMode" as const] : []),
