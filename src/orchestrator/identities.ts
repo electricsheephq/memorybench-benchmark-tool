@@ -84,14 +84,27 @@ export function runIdentities(
     predicate: "PREDICATE",
     object: "OBJECT",
   }
+  // Keep the legacy two-render context frozen; tagged probes distinguish precedence.
+  const taggedContext = {
+    ...context,
+    text: "TEXT",
+    valid_at: "2000-01-07",
+    metadata: {
+      ...context.metadata,
+      timestamp: "2000-01-02",
+      event_date: "2000-01-03",
+      session_date: "2000-01-04",
+      temporalContext: { documentDate: "2000-01-05", eventDate: "2000-01-06" },
+    },
+  }
   // Shared fixed branch matrix, rendered separately through each provider:
   // empty/full/sparse context; scalar/list question; absent/present date.
   // Full hits cover Cortex triples, Zep edges and Supermemory array chunks;
   // sparse hits cover text fallbacks, Zep nodes and singular/no chunks.
   const contexts: Record<string, unknown>[][] = [
     [],
-    [context],
-    [{ content: "CONTENT", memory: "MEMORY", fact: "FACT", chunk: "CHUNK" }],
+    [taggedContext],
+    [{ content: "CONTENT", memory: "MEMORY", fact: "FACT", text: "TEXT", chunk: "CHUNK" }],
     [{ _type: "node", name: "ENTITY", summary: "SUMMARY" }],
     [{ text: "TEXT", metadata: {} }],
     [{ fact: "FACT", metadata: { date: "2000-01-01" } }],
@@ -105,7 +118,7 @@ export function runIdentities(
       },
     ],
     [{ memory: "MEMORY", metadata: { temporalContext: { eventDate: ["2000-01-01"] } } }],
-    ...missingFieldInputs(context).map((hit) => [hit]),
+    ...missingFieldInputs(taggedContext).map((hit) => [hit]),
     ...missingFieldInputs({ _type: "node", name: "ENTITY", summary: "SUMMARY" }).map((hit) => [
       hit,
     ]),
@@ -116,7 +129,7 @@ export function runIdentities(
         { content: "LATER", position: 2 },
       ],
     }).map((hit) => [hit]),
-    [context, context],
+    [taggedContext, taggedContext],
   ]
   const readerPrompts = [
     "QUESTION",
@@ -149,7 +162,7 @@ export function runIdentities(
   const questions = benchmark.getQuestions()
   const sessions = new Map<string, Set<string>>()
   const serializedSessions = new WeakMap<UnifiedSession, string>()
-  const normalizedInputs = [...questions]
+  const questionSessions = [...questions]
     .sort((a, b) => a.questionId.localeCompare(b.questionId))
     .map((question) => ({
       question,
@@ -159,9 +172,16 @@ export function runIdentities(
         const variants = sessions.get(session.sessionId) ?? new Set<string>()
         variants.add(content)
         sessions.set(session.sessionId, variants)
-        return session.sessionId
+        return [session.sessionId, content] as const
       }),
     }))
+  const normalizedInputs = questionSessions.map(({ question, sessions: refs }) => ({
+    question,
+    sessions: refs.map(([id, content]) => {
+      const variants = [...sessions.get(id)!]
+      return variants.length === 1 ? id : `${id}#${variants.indexOf(content)}`
+    }),
+  }))
   // Sort ids as before; retain distinct content in first-seen question order.
   // Reuse serialized session JSON so shared objects are read only once, while
   // preserving the exact previous JSON bytes for datasets without conflicting ids.

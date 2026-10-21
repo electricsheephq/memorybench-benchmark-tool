@@ -334,3 +334,54 @@ test("equal shared content in distinct objects is deduplicated", () => {
   `
   )
 })
+
+// R3: the global A/B variant set stays unchanged when q3 switches A -> B.
+test("A B A to A B B refuses before provider init with byte-identical checkpoint", () => {
+  probe(
+    setup("filesystem") +
+      `
+    benchmark.getQuestions=()=>["q1","q2","q3"].map(questionId=>({questionId,question:"Q",groundTruth:"A",questionType:"single-hop",haystackSessionIds:["s"]}));
+    const a={sessionId:"s",messages:[{role:"user",content:"A"}]};
+    const b={sessionId:"s",messages:[{role:"user",content:"B"}]};
+    const perQuestion={q1:[a],q2:[b],q3:[a]};
+    benchmark.getHaystackSessions=id=>perQuestion[id];
+    await runner.run(options);
+    await runner.run({...options,phases:["answer"]});
+    const before=readFileSync(path), count=initialized;
+    perQuestion.q3=[b];
+    let error="";
+    try { await runner.run({...options,phases:["answer"]}); } catch(e) { error=e.message; }
+    if (!error.includes("identity mismatch: normalizedInputsSha256") || initialized!==count || !readFileSync(path).equals(before))
+      throw new Error("A B A -> A B B accepted or checkpoint/provider touched: " + error);
+  `
+  )
+})
+
+for (const [name, label, before, after] of [
+  ["cortex", "date precedence", "claim.metadata?.event_date ||\n    claim.metadata?.date ||\n    claim.metadata?.timestamp ||\n    claim.metadata?.session_date", "claim.metadata?.session_date ||\n    claim.metadata?.timestamp ||\n    claim.metadata?.date ||\n    claim.metadata?.event_date"],
+  ["mem0", "date/timestamp precedence", "metadata.date || metadata.timestamp", "metadata.timestamp || metadata.date"],
+  ["cortex", "memory/fact/content/text precedence", "stringifyValue(claim.memory) ||\n    stringifyValue(claim.fact) ||\n    stringifyValue(claim.content) ||\n    stringifyValue(claim.text)", "stringifyValue(claim.text) ||\n    stringifyValue(claim.content) ||\n    stringifyValue(claim.fact) ||\n    stringifyValue(claim.memory)"],
+  ["zep", "name/summary selection", 'const name = result.name || "Unknown"\n      const summary = result.summary || ""', 'const name = result.summary || "Unknown"\n      const summary = result.name || ""'],
+  ["zep", "fact/JSON precedence", "result.fact || JSON.stringify(r)", "JSON.stringify(r) || result.fact"],
+  ["mem0", "memory/JSON precedence", "mem.memory || JSON.stringify(r)", "JSON.stringify(r) || mem.memory"],
+]) {
+  test(`precedence reversal changes tagged reader and refuses answer: ${name} ${label}`, () => {
+    probe(
+      setup(name!) +
+        `
+      await runner.run(options);
+      const old=read().readerPromptVersion;
+      if (!old.startsWith("rpv2:")) throw new Error("expected tagged reader");
+      await runner.run({...options,phases:["answer"]});
+      const text=readFileSync(source+"/src/providers/"+name+"/prompts.ts","utf8");
+      const changed=text.replace(${JSON.stringify(before)},${JSON.stringify(after)});
+      if(text===changed) throw new Error("mutation did not apply");
+      writeFileSync("./precedence-mutant.ts",changed);
+      const mutant=await import(process.cwd()+"/precedence-mutant.ts");
+      prompts={...prompts,answerPrompt:Object.values(mutant).find(value=>value?.answerPrompt).answerPrompt};
+      if(runIdentities(benchmark,{name,prompts},"openai:gpt-4o").readerPromptVersion===old) throw new Error("version unchanged");
+      await refuse();
+    `
+    )
+  })
+}
