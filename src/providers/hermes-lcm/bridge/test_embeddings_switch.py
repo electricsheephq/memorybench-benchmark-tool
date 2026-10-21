@@ -234,33 +234,51 @@ def test_product_positive_control(make_bridge, monkeypatch, tmp_path):
         Path(evidence).write_text(json.dumps(receipts, indent=2) + "\n")
 
 
+@pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
+def test_summary_node_carries_the_sessions_time_bounds(make_bridge):
+    """lcm-x #950: lcm_recall's recency prior reads a summary node's latest_at. With created_at 1..N alone, every
+    summary hit sat at the recency floor (0.5) while message hits, stored at ingest time, scored about 1.0."""
+    session, _ = _short_conversation()
+    instance = make_bridge("off")
+    instance.initialize({})
+    instance.ingest({"containerTag": "bounds", "session": session})
+    with sqlite3.connect(instance._db_path("bounds")) as connection:
+        node = connection.execute("SELECT session_id, earliest_at, latest_at FROM summary_nodes").fetchone()
+        bounds = connection.execute(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE session_id = ?", (node[0],)
+        ).fetchone()
+    assert bounds[1] is not None
+    assert tuple(node[1:]) == tuple(bounds)
+
+
 def test_resume_skips_a_session_already_ingested(make_bridge, tmp_path):
     instance = make_bridge("off")
     instance.initialize({})
+    instance.sender_render_mode = "off"  # the record predates ingest-mode records
     instance._ingested_path("resume").write_text(json.dumps({"s1": [4, 5, 6]}), encoding="utf-8")
     reply = instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
-    assert reply == {"ok": True, "documentIds": ["4", "5", "6"], "resumed": True}
+    assert reply == {"ok": True, "documentIds": ["4", "5", "6"], "resumed": True, "unparsed_session_dates_total": 0}
     assert not instance._db_path("resume").exists()
 
 
 def test_unreadable_completion_record_stops_the_run(make_bridge):
     instance = make_bridge("off")
     instance.initialize({})
+    instance.sender_render_mode = "off"  # the record predates ingest-mode records
     instance._ingested_path("resume").write_text("{not json", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
 
 
-def test_resume_refuses_a_container_from_the_older_format(make_bridge):
+def test_resume_refuses_a_container_ingested_without_speaker_names(make_bridge):
+    # A container written before ingest modes were recorded holds content as
+    # given; resuming it under the default prefix mode would mix both forms.
     instance = make_bridge("off")
     instance.initialize({})
-    legacy = instance.workdir / "old.ingested.json"
-    legacy.write_text('{"s1": [1]}', encoding="utf-8")
-    with pytest.raises(RuntimeError, match="older bridge format"):
+    instance._ingested_path("old").write_text('{"s1": [1]}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="ingest modes differ"):
         instance.ingest({"containerTag": "old", "session": {"sessionId": "s1", "messages": []}})
     assert not instance._db_path("old").exists()
-    assert instance.clear({"containerTag": "old"}) == {"ok": True}
-    assert not legacy.exists()
 
 
 @pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
