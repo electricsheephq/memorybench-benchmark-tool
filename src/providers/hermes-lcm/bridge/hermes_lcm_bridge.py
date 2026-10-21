@@ -34,7 +34,8 @@ Environment:
     HERMES_MB_PROVIDER            embedding provider: fastembed (default) | voyage | stub
     HERMES_MB_EMBEDDINGS          on (default) | off (full-text recall)
     HERMES_MB_EVENT_TIME          off (default) | session (declared event time)
-    HERMES_MB_SENDER_RENDER       off (default) | gateway ([speaker] content)
+    HERMES_MB_SENDER_RENDER       prefix (default; speaker: content) | gateway
+                                  ([speaker] content) | off (content as given)
     HERMES_MB_MODEL              embedding model id (default per provider)
     HERMES_MB_ANSWER_READY_CONTENT_CHARS
                                   per-result exact-read cap (default 2400)
@@ -105,10 +106,10 @@ def _positive_int_env(name: str, default: int) -> int:
     return value
 
 
-def _mode_env(name: str, enabled: str) -> str:
-    value = os.environ.get(name, "off")
-    if value not in {"off", enabled}:
-        raise RuntimeError(f"{name} must be off or {enabled}")
+def _mode_env(name: str, *enabled: str, default: str = "off") -> str:
+    value = os.environ.get(name, default)
+    if value not in {"off", *enabled}:
+        raise RuntimeError(f"{name} must be off or {' or '.join(enabled)}")
     return value
 
 
@@ -162,7 +163,9 @@ def _ingest_messages(
     messages = []
     for index, message in enumerate(session.get("messages", [])):
         content = str(message.get("content", ""))
-        if sender_render == "gateway" and message.get("speaker") is not None:
+        if sender_render == "prefix" and message.get("speaker"):
+            content = f"{message['speaker']}: {content}"
+        elif sender_render == "gateway" and message.get("speaker") is not None:
             # Gateway neutralization: replace line/control characters, then
             # collapse whitespace. Apply to both roles for the declared F61 arm.
             speaker = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(message["speaker"]))
@@ -566,7 +569,9 @@ class Bridge:
             raise RuntimeError("HERMES_MB_EMBEDDINGS must be on or off")
         self.embeddings_enabled = embeddings == "on"
         self.event_time_mode = _mode_env("HERMES_MB_EVENT_TIME", "session")
-        self.sender_render_mode = _mode_env("HERMES_MB_SENDER_RENDER", "gateway")
+        self.sender_render_mode = _mode_env(
+            "HERMES_MB_SENDER_RENDER", "prefix", "gateway", default="prefix"
+        )
         self._initialized = False
 
         self.provider_name = (

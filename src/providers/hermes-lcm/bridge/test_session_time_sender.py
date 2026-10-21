@@ -81,9 +81,11 @@ def ingest_capture(make_bridge, monkeypatch):
     return run
 
 
-@pytest.mark.parametrize("mode", [None, "off"])
-def test_off_product_payload_is_byte_identical_to_base(ingest_capture, mode):
-    instance, response, (session_id, payload, kwargs), _session, _tag = ingest_capture(mode, mode)
+@pytest.mark.parametrize("event_time", [None, "off"])
+def test_off_product_payload_is_byte_identical_to_base(ingest_capture, event_time):
+    instance, response, (session_id, payload, kwargs), _session, _tag = ingest_capture(
+        event_time, "off"
+    )
     base = [{"role": str(m.get("role", "user")), "content": str(m.get("content", ""))}
             for m in SESSION["messages"]]
     assert payload == json.dumps(base).encode()
@@ -92,6 +94,18 @@ def test_off_product_payload_is_byte_identical_to_base(ingest_capture, mode):
     assert response == {"ok": True, "documentIds": ["1", "2", "3"], "unparsed_session_dates_total": 0}
     assert instance._harness_settings() == {
         "HERMES_MB_EVENT_TIME": "off", "HERMES_MB_SENDER_RENDER": "off",
+    }
+
+
+def test_default_sender_render_prefixes_named_speakers_only(ingest_capture):
+    instance, _response, (_sid, payload, _kwargs), _session, _tag = ingest_capture()
+    messages = json.loads(payload)
+    assert [m["content"] for m in messages] == [
+        "Alpha\n\x00 \t Team: First turn", "Beta: Second turn", "No speaker",
+    ]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert instance._harness_settings() == {
+        "HERMES_MB_EVENT_TIME": "off", "HERMES_MB_SENDER_RENDER": "prefix",
     }
 
 
@@ -147,7 +161,7 @@ def test_gateway_only_leaves_time_and_speakerless_turns_unchanged(ingest_capture
 
 
 @pytest.mark.parametrize("name, enabled", [
-    ("HERMES_MB_EVENT_TIME", "session"), ("HERMES_MB_SENDER_RENDER", "gateway"),
+    ("HERMES_MB_EVENT_TIME", "session"), ("HERMES_MB_SENDER_RENDER", "prefix or gateway"),
 ])
 def test_modes_validate_at_bridge_construction(make_bridge, monkeypatch, name, enabled):
     monkeypatch.setenv(name, "undeclared")
