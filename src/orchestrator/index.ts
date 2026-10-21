@@ -1,3 +1,4 @@
+import { runIdentities, assertResumeIdentities, questionSetSha256 } from "./identities"
 import type { ProviderName } from "../types/provider"
 import type { BenchmarkName } from "../types/benchmark"
 import type { JudgeName } from "../types/judge"
@@ -109,8 +110,10 @@ export class Orchestrator {
   async run(options: OrchestratorOptions): Promise<void> {
     const resume = options.force ? undefined : this.checkpointManager.load(options.runId)
     assertSafeHarnessModes(
-      resume, options.phases && !options.phases.includes("answer")
-        ? resume?.answeringModel : options.answeringModel
+      resume,
+      options.phases && !options.phases.includes("answer")
+        ? resume?.answeringModel
+        : options.answeringModel
     )
     const {
       provider: providerName,
@@ -157,6 +160,15 @@ export class Orchestrator {
       logger.info("Cleared existing checkpoint (--force)")
     }
 
+    const benchmark = createBenchmark(benchmarkName)
+    await benchmark.load()
+    const provider = createProvider(providerName)
+    const cliJudge = cliLlmProvenance("judge")
+    const scoringJudge = cliJudge
+      ? `cli:${cliLlmBackend()}:${cliJudge.model}`
+      : `${judgeName}:${judgeModelInfo.id}`
+    const identities = runIdentities(benchmark, provider, scoringJudge)
+
     let checkpoint!: RunCheckpoint
     let effectiveLimit: number | undefined
     let targetQuestionIds: string[] | undefined
@@ -170,18 +182,37 @@ export class Orchestrator {
         benchmarkName,
         judgeModel,
         answeringModel,
-        { limit, sampling, concurrency, status: "initializing",
-          dataSourceRunId: force ? `${runId}-force-${randomUUID()}` : undefined }
+        {
+          identities,
+          limit,
+          sampling,
+          concurrency,
+          status: "initializing",
+          dataSourceRunId: force ? `${runId}-force-${randomUUID()}` : undefined,
+        }
       )
       logger.info("Created checkpoint (initializing)")
     }
 
-    const benchmark = createBenchmark(benchmarkName)
-    await benchmark.load()
     const allQuestions = benchmark.getQuestions()
 
     if (this.checkpointManager.exists(runId) && !isNewRun) {
       checkpoint = this.checkpointManager.load(runId)!
+      // The stored ordered selection is authoritative on resume, including random
+      // samples and explicit ids. Never re-sample or silently lose missing targets.
+      if (checkpoint.questionSetSha256 !== undefined && checkpoint.targetQuestionIds) {
+        validateExplicitQuestionIds(allQuestions, checkpoint.targetQuestionIds)
+      }
+      identities.questionSetSha256 = questionSetSha256(
+        checkpoint.targetQuestionIds ?? allQuestions.map((q) => q.questionId)
+      )
+      assertResumeIdentities(checkpoint, identities, phases)
+      // Judge-overridden copies clear these fields. Stamp them when scoring
+      // first resumes, while leaving legacy checkpoints without identities alone.
+      if (phases.includes("evaluate") && checkpoint.datasetSha256 !== undefined) {
+        checkpoint.scoringPath ??= identities.scoringPath
+        checkpoint.promptVersion ??= identities.promptVersion
+      }
 
       effectiveLimit = checkpoint.limit
       targetQuestionIds = checkpoint.targetQuestionIds
@@ -267,6 +298,7 @@ export class Orchestrator {
         targetQuestionIds = allQuestions.slice(0, effectiveLimit).map((q) => q.questionId)
       } else {
         logger.info(`No sampling/limit specified, using all ${allQuestions.length} questions`)
+        targetQuestionIds = allQuestions.map((q) => q.questionId)
       }
 
       checkpoint.targetQuestionIds = targetQuestionIds
@@ -275,6 +307,8 @@ export class Orchestrator {
       const questionsToInit = targetQuestionIds
         ? allQuestions.filter((q) => targetQuestionIds!.includes(q.questionId))
         : allQuestions
+
+      checkpoint.questionSetSha256 = questionSetSha256(targetQuestionIds!)
 
       for (const q of questionsToInit) {
         const containerTag = `${q.questionId}-${checkpoint.dataSourceRunId}`
@@ -301,8 +335,8 @@ export class Orchestrator {
     }
     this.checkpointManager.save(checkpoint)
 
-    const provider = createProvider(providerName)
     let primaryFailed = false
+    // prettier-ignore
     try {
     await provider.initialize(getProviderConfig(providerName))
 
@@ -389,7 +423,10 @@ export class Orchestrator {
   ): Promise<void> {
     await this.run({
       ...options,
-      judgeModel: options.judgeModel || "gpt-4o",
+      judgeModel:
+        options.judgeModel ||
+        (!options.force && this.checkpointManager.load(options.runId)?.judge) ||
+        "gpt-4o",
       phases: ["ingest", "indexing"],
     })
   }
@@ -397,7 +434,14 @@ export class Orchestrator {
   async search(
     options: Omit<OrchestratorOptions, "judgeModel" | "phases"> & { judgeModel?: string }
   ): Promise<void> {
-    await this.run({ ...options, judgeModel: options.judgeModel || "gpt-4o", phases: ["search"] })
+    await this.run({
+      ...options,
+      judgeModel:
+        options.judgeModel ||
+        (!options.force && this.checkpointManager.load(options.runId)?.judge) ||
+        "gpt-4o",
+      phases: ["search"],
+    })
   }
 
   async evaluate(options: OrchestratorOptions): Promise<void> {

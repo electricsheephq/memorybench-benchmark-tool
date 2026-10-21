@@ -1,5 +1,5 @@
 import type { RecallHealth, RecallConfig } from "./provider"
-import type { CliLedgerSummary, LlmExecutionProvenance } from "./checkpoint"
+import type { CliLedgerSummary, LlmExecutionProvenance, RunIdentities } from "./checkpoint"
 
 export interface QuestionTypeInfo {
   id: string
@@ -104,7 +104,7 @@ export interface TokenMetrics {
   avgContextTokens: number
 }
 
-export interface BenchmarkResult {
+export interface BenchmarkResult extends Partial<RunIdentities> {
   recallConfig?: RecallConfig
   provider: string
   benchmark: string

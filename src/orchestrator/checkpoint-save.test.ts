@@ -150,7 +150,12 @@ describe("orchestrator provider cleanup", () => {
       checkpoint.questions.q!.phases.indexing.status = "completed"
       manager.save(checkpoint)
       await manager.flush(checkpoint.runId)
-      const load = spyOn(LoCoMoBenchmark.prototype, "load").mockResolvedValue(undefined)
+      const load = spyOn(LoCoMoBenchmark.prototype, "load").mockImplementation(async function (
+        this: LoCoMoBenchmark
+      ) {
+        this.datasetPath = "./synthetic.json"
+        this.datasetSha256 = "a".repeat(64)
+      })
       const questions = spyOn(LoCoMoBenchmark.prototype, "getQuestions").mockReturnValue([question])
       const initialize = spyOn(HermesLcmProvider.prototype, "initialize").mockResolvedValue(
         undefined

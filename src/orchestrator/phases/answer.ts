@@ -72,7 +72,7 @@ export function buildAnswerPrompt(
   question: string,
   context: unknown[],
   questionDate?: string,
-  provider?: Provider,
+  provider?: Pick<Provider, "prompts">,
   presentationMode: AnswerPresentationMode = "raw_json_v1"
 ): string {
   return buildAnswerPromptWithPresentation(
@@ -88,7 +88,7 @@ export function buildAnswerPromptWithPresentation(
   question: string,
   context: unknown[],
   questionDate?: string,
-  provider?: Provider,
+  provider?: Pick<Provider, "prompts">,
   presentationMode: AnswerPresentationMode = "raw_json_v1"
 ): { prompt: string; presentation?: EvidenceCardPresentation } {
   if (presentationMode === "evidence_cards_v1") {

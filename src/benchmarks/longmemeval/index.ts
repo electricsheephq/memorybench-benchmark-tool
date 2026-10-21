@@ -1,3 +1,4 @@
+import { datasetIdentity, relativeDatasetPath } from "../../orchestrator/identities"
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import type { Benchmark, BenchmarkConfig, QuestionFilter } from "../../types/benchmark"
@@ -81,6 +82,8 @@ export const LONGMEMEVAL_QUESTION_TYPES: QuestionTypeRegistry = {
 
 export class LongMemEvalBenchmark implements Benchmark {
   name = "longmemeval"
+  datasetSha256?: string
+  datasetPath?: string
   private data: LongMemEvalItem[] = []
   private questions: UnifiedQuestion[] = []
   private sessionsMap: Map<string, UnifiedSession[]> = new Map()
@@ -88,7 +91,7 @@ export class LongMemEvalBenchmark implements Benchmark {
 
   async load(config?: BenchmarkConfig): Promise<void> {
     this.dataPath = config?.dataPath || DEFAULT_DATA_PATH
-    const fullPath = join(process.cwd(), this.dataPath)
+    const fullPath = join(process.cwd(), relativeDatasetPath(this.dataPath))
     const rawDataPath = join(fullPath, "longmemeval_s_cleaned.json")
     const questionsDir = join(fullPath, "questions")
 
@@ -102,7 +105,9 @@ export class LongMemEvalBenchmark implements Benchmark {
       await this.splitQuestions(rawDataPath, questionsDir)
     }
 
-    this.loadQuestions(questionsDir)
+    const bytes = readFileSync(rawDataPath)
+    Object.assign(this, datasetIdentity(this.dataPath, bytes))
+    this.loadQuestions(bytes.toString("utf8"), questionsDir)
   }
 
   private async downloadDataset(destPath: string): Promise<void> {
@@ -183,11 +188,26 @@ export class LongMemEvalBenchmark implements Benchmark {
     logger.success(`Split ${dataset.length} questions`)
   }
 
-  private loadQuestions(questionsDir: string): void {
-    const files = readdirSync(questionsDir).filter((f) => f.endsWith(".json"))
-
-    for (const file of files) {
-      const item: LongMemEvalItem = JSON.parse(readFileSync(join(questionsDir, file), "utf8"))
+  private loadQuestions(content: string, questionsDir: string): void {
+    // Read the hashed source, not potentially stale split-file caches.
+    const items: LongMemEvalItem[] = JSON.parse(content)
+    // Preserve base's readdir order on each filesystem (including APFS's non-lexical
+    // order). Never consume cached content. New source ids absent from a stale cache
+    // follow in source order; stale cached ids are ignored. The run's ordered
+    // questionSetSha256 pins the actual selection and refuses order drift on resume.
+    const byId = new Map(
+      items.filter((item) => item.question_id).map((item) => [item.question_id, item])
+    )
+    const orderedIds = new Set([
+      ...readdirSync(questionsDir)
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => file.slice(0, -5)),
+      ...byId.keys(),
+    ])
+    for (const id of orderedIds) {
+      const item = byId.get(id)
+      if (!item) continue
+      if (!item.question_id) continue
       this.data.push(item)
 
       const sessions = this.extractSessions(item)

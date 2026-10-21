@@ -266,6 +266,13 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
 
   const result: BenchmarkResult = {
     recallConfig: checkpoint.recallConfig ?? "UNKNOWN",
+    datasetSha256: checkpoint.datasetSha256,
+    datasetPath: checkpoint.datasetPath,
+    questionSetSha256: checkpoint.questionSetSha256,
+    promptVersion: checkpoint.promptVersion,
+    readerPromptVersion: checkpoint.readerPromptVersion,
+    scoringPath: checkpoint.scoringPath,
+    answerPresentationMode: checkpoint.answerPresentationMode,
     provider: checkpoint.provider,
     benchmark: checkpoint.benchmark,
     runId: checkpoint.runId,

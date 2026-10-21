@@ -1,3 +1,4 @@
+import { datasetIdentity, relativeDatasetPath } from "../../orchestrator/identities"
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from "fs"
 import { join } from "path"
 import type { Benchmark, BenchmarkConfig, QuestionFilter } from "../../types/benchmark"
@@ -68,13 +69,15 @@ export const CONVOMEM_QUESTION_TYPES: QuestionTypeRegistry = {
 
 export class ConvoMemBenchmark implements Benchmark {
   name = "convomem"
+  datasetSha256?: string
+  datasetPath?: string
   private questions: UnifiedQuestion[] = []
   private sessionsMap: Map<string, UnifiedSession[]> = new Map()
   private dataPath: string = ""
 
   async load(config?: BenchmarkConfig): Promise<void> {
     this.dataPath = config?.dataPath || DEFAULT_DATA_PATH
-    const fullPath = join(process.cwd(), this.dataPath)
+    const fullPath = join(process.cwd(), relativeDatasetPath(this.dataPath))
 
     if (!existsSync(fullPath)) {
       mkdirSync(fullPath, { recursive: true })
@@ -86,7 +89,9 @@ export class ConvoMemBenchmark implements Benchmark {
       await this.downloadDataset(fullPath, dataFile)
     }
 
-    this.loadQuestions(dataFile)
+    const bytes = readFileSync(dataFile)
+    Object.assign(this, datasetIdentity(this.dataPath, bytes))
+    this.loadQuestions(bytes.toString("utf8"))
   }
 
   private async downloadDataset(fullPath: string, dataFile: string): Promise<void> {
@@ -139,9 +144,8 @@ export class ConvoMemBenchmark implements Benchmark {
     logger.success(`Downloaded ConvoMem dataset (${allItems.length} items)`)
   }
 
-  private loadQuestions(dataFile: string): void {
+  private loadQuestions(content: string): void {
     try {
-      const content = readFileSync(dataFile, "utf8")
       const items: { category: string; item: ConvoMemEvidence }[] = JSON.parse(content)
 
       for (let i = 0; i < items.length; i++) {

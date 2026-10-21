@@ -27,6 +27,9 @@ ${groundTruthLabel}: ${input.groundTruth}
 System's Hypothesis: ${input.hypothesis}`
 }
 
+// Bump whenever verdict parsing or scoring changes.
+export const SCORING_VERSION = "score-v1"
+
 export function parseJudgeResponse(response: string): JudgeResult {
   try {
     const jsonMatch = response.match(/\{[\s\S]*\}/)
