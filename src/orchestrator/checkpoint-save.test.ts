@@ -25,6 +25,32 @@ function fixture() {
 }
 
 describe("coalesced checkpoint saves", () => {
+  test("a recovery flush drains the newer save after the first drain fails", async () => {
+    const { manager, checkpoint } = fixture()
+    await manager.flush(checkpoint.runId)
+    const writer = manager as unknown as { _performSave(checkpoint: RunCheckpoint): Promise<void> }
+    const performSave = writer._performSave.bind(manager)
+    let reject!: (error: Error) => void, began!: () => void
+    const started = new Promise<void>((resolve) => { began = resolve })
+    let first = true
+    const writes = spyOn(writer, "_performSave").mockImplementation(async (latest) => {
+      if (first) {
+        first = false
+        began()
+        await new Promise<void>((_resolve, fail) => { reject = fail })
+      }
+      await performSave(latest)
+    })
+    restore.push(() => writes.mockRestore())
+    manager.save({ ...checkpoint, limit: 1 })
+    await started
+    manager.save({ ...checkpoint, limit: 2 })
+    reject(new Error("synthetic write failure"))
+    await expect(manager.flush(checkpoint.runId)).rejects.toThrow("synthetic write failure")
+    await manager.flush(checkpoint.runId)
+    expect(manager.load(checkpoint.runId)?.limit).toBe(2)
+  })
+
   test("50 large saves coalesce, persist the final state, and let a timer run", async () => {
     const { manager, checkpoint } = fixture()
     manager.initQuestion(checkpoint, "q", "fixture-container", {

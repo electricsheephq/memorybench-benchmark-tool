@@ -87,38 +87,61 @@ def group_exists(pgid):
 
 
 def stop_group(proc):
+    global cleaning, deferred_signal
+    cleaning = True
     pgid = proc.pid  # start_new_session makes this exact child the group leader.
-    if group_exists(pgid):
-        record(f"TERM pgid={pgid}")
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        end = time.monotonic() + grace_s
-        while group_exists(pgid) and time.monotonic() < end:
-            proc.poll()  # Reap the leader while waiting for descendants.
-            time.sleep(min(0.1, grace_s))
+    try:
         if group_exists(pgid):
+            record(f"TERM pgid={pgid}")
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            end = time.monotonic() + grace_s
+            while group_exists(pgid) and time.monotonic() < end:
+                proc.poll()  # Reap the leader while waiting for descendants.
+                time.sleep(min(0.1, grace_s))
+    finally:
+        try:
             record(f"KILL pgid={pgid}")
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-    proc.wait()
+            except PermissionError:
+                if group_exists(pgid):
+                    raise  # macOS can report EPERM after the group has already exited.
+            proc.wait()
+        finally:
+            cleaning = False
+        if deferred_signal is not None:
+            raise SystemExit(128 + deferred_signal)
 
 
 def interrupted(signum, _frame):
+    global deferred_signal
+    if cleaning:
+        deferred_signal = signum
+        return
     raise SystemExit(128 + signum)
 
 
+pgid_path = log_path.with_suffix(log_path.suffix + ".pgid")
+if pgid_path.exists():
+    previous_pgid = int(pgid_path.read_text().strip())
+    if previous_pgid <= 1 or group_exists(previous_pgid):
+        fail("previous run process group is still alive; refusing overlapping start")
+cleaning, deferred_signal = False, None
 for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(signum, interrupted)
 for attempt in range(max_resumes + 1):
     with log_path.open("ab", buffering=0) as output:
-        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+        proc = None
         try:
-            log_path.with_suffix(log_path.suffix + ".pgid").write_text(str(proc.pid) + "\n")
+            proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                                    stderr=subprocess.STDOUT, start_new_session=True,
+                                    pass_fds=(actions.fileno(),))  # Child retains lock if watchdog dies.
+            pgid_path.write_text(str(proc.pid) + "\n")
             record(f"START attempt={attempt} pgid={proc.pid}")
             size, last_growth = log_path.stat().st_size, time.monotonic()
             stalled = False
@@ -151,7 +174,8 @@ for attempt in range(max_resumes + 1):
                     stalled = True
                     break
         finally:
-            stop_group(proc)  # Also clean descendants after normal leader exit.
+            if proc is not None:
+                stop_group(proc)  # Also clean descendants after normal leader exit.
     if not stalled:
         record(f"EXIT code={proc.returncode}")
         sys.exit(proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)

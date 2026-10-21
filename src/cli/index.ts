@@ -45,6 +45,7 @@ Options:
   -m, --answering-model  Answering model (default: ${DEFAULT_ANSWERING_MODEL})
   -q, --question-id      Question ID (for test command)
   --force                Clear checkpoint and start fresh
+  --allow-unsafe-1700     Override the guard for deferred #1700 modes
 
 Run 'bun run src/index.ts help <topic>' for more details:
   help providers   - List all memory providers
@@ -159,6 +160,10 @@ Usage:
 }
 
 export async function cli(args: string[]): Promise<void> {
+  if (args.includes("--allow-unsafe-1700")) {
+    process.env.HERMES_MB_ALLOW_UNSAFE_1700 = "1"
+    args = args.filter((arg) => arg !== "--allow-unsafe-1700")
+  }
   const command = args[0]
   const commandArgs = args.slice(1)
 

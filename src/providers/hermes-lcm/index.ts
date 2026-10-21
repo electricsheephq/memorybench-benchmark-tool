@@ -49,11 +49,18 @@ class BridgeHandle {
   private queue: Promise<unknown> = Promise.resolve()
   deadError: Error | null = null
   private closed = false
+  private stopping?: Promise<void>
+  private readonly exited: Promise<void>
 
   constructor(
     private readonly proc: ChildProcessWithoutNullStreams,
-    private readonly tag: string
+    private readonly tag: string,
+    private readonly onDead: () => void = () => {}
   ) {
+    this.exited = new Promise((resolve) => {
+      this.proc.once("exit", () => resolve())
+      this.proc.once("error", () => resolve())
+    })
     this.proc.stdout.setEncoding("utf8")
     this.proc.stderr.setEncoding("utf8")
     this.proc.stdout.on("data", (chunk: string) => this.onStdout(chunk))
@@ -97,7 +104,10 @@ class BridgeHandle {
   }
 
   private markDead(error: Error): void {
-    if (!this.deadError) this.deadError = error
+    if (!this.deadError) {
+      this.deadError = error
+      this.onDead()
+    }
     if (this.pending) {
       clearTimeout(this.pending.timer)
       this.pending.reject(error)
@@ -111,19 +121,25 @@ class BridgeHandle {
   ): Promise<BridgeResponse> {
     const run = async (): Promise<BridgeResponse> => {
       if (this.deadError) throw this.deadError
-      const response = await new Promise<BridgeResponse>((resolve, reject) => {
-        const timer = setTimeout(
-          () =>
-            this.markDead(
-              new Error(
-                `hermes-lcm bridge (${this.tag}) timed out after ${timeoutMs}ms on ${payload.cmd}`
-              )
-            ),
-          timeoutMs
-        )
-        this.pending = { resolve, reject, timer }
-        this.proc.stdin.write(`${JSON.stringify(payload)}\n`)
-      })
+      let response: BridgeResponse
+      try {
+        response = await new Promise<BridgeResponse>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              this.markDead(
+                new Error(
+                  `hermes-lcm bridge (${this.tag}) timed out after ${timeoutMs}ms on ${payload.cmd}`
+                )
+              ),
+            timeoutMs
+          )
+          this.pending = { resolve, reject, timer }
+          this.proc.stdin.write(`${JSON.stringify(payload)}\n`)
+        })
+      } catch (error) {
+        if (this.deadError) await this.close()
+        throw error
+      }
       if (!response.ok) {
         throw new Error(`hermes-lcm ${payload.cmd} failed: ${response.error}`)
       }
@@ -138,8 +154,10 @@ class BridgeHandle {
     return result
   }
 
-  close(): void {
+  close(): Promise<void> {
+    if (this.stopping) return this.stopping
     this.closed = true
+    this.markDead(new Error(`hermes-lcm bridge (${this.tag}) closed`))
     try {
       this.proc.stdin.end()
     } catch {
@@ -150,6 +168,12 @@ class BridgeHandle {
     } catch {
       // Best-effort process cleanup.
     }
+    this.stopping = (async () => {
+      if (this.proc.exitCode !== null || this.proc.signalCode !== null) return
+      const timer = setTimeout(() => this.proc.kill("SIGKILL"), 1000)
+      try { await this.exited } finally { clearTimeout(timer) }
+    })()
+    return this.stopping
   }
 }
 
@@ -195,7 +219,7 @@ export class HermesLcmProvider implements Provider {
         `Initialized hermes-lcm provider (provider=${response.provider}, model=${response.model}, dim=${response.dim}, concurrency=${PROVIDER_CONCURRENCY})`
       )
     } finally {
-      probe.close()
+      await probe.close()
     }
   }
 
@@ -203,16 +227,23 @@ export class HermesLcmProvider implements Provider {
     const proc = spawn(this.python, [this.script, "serve"], {
       env: this.spawnEnv,
     }) as ChildProcessWithoutNullStreams
-    return new BridgeHandle(proc, tag)
+    const handle = new BridgeHandle(proc, tag, () => {
+      if (this.handles.get(tag) === handle) this.handles.delete(tag)
+    })
+    return handle
   }
 
   private async getHandle(tag: string): Promise<BridgeHandle> {
     const existing = this.handles.get(tag)
     if (existing) {
-      if (existing.deadError) throw existing.deadError
-      this.handles.delete(tag)
-      this.handles.set(tag, existing)
-      return existing
+      if (existing.deadError) {
+        this.handles.delete(tag)
+        await existing.close()
+      } else {
+        this.handles.delete(tag)
+        this.handles.set(tag, existing)
+        return existing
+      }
     }
 
     while (this.handles.size >= MAX_BRIDGES) {
@@ -220,7 +251,7 @@ export class HermesLcmProvider implements Provider {
       if (leastRecentTag === undefined) break
       const leastRecent = this.handles.get(leastRecentTag)!
       this.handles.delete(leastRecentTag)
-      leastRecent.close()
+      await leastRecent.close()
     }
 
     const handle = this.spawnHandle(tag)
@@ -311,16 +342,15 @@ export class HermesLcmProvider implements Provider {
     } catch (error) {
       logger.warn(`Failed to clear hermes-lcm container ${containerTag}: ${error}`)
     } finally {
-      handle.close()
+      await handle.close()
     }
   }
 
   /** Close bridge processes without deleting their on-disk stores. */
-  close(): void {
-    for (const handle of this.handles.values()) {
-      handle.close()
-    }
+  async close(): Promise<void> {
+    const closing = [...this.handles.values()].map((handle) => handle.close())
     this.handles.clear()
+    await Promise.all(closing)
   }
 }
 

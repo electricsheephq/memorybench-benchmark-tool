@@ -745,10 +745,10 @@ class Bridge:
     def _load_dates(self, container_tag: str) -> dict[str, Any]:
         path = self._dates_path(container_tag)
         if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return {}
+            dates = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(dates, dict):
+                raise RuntimeError("unreadable dates sidecar: expected an object")
+            return dates
         return {}
 
     def _config(self, db_path: Path):
@@ -925,9 +925,10 @@ class Bridge:
         if session_date:
             dates = self._load_dates(container_tag)
             dates[session_id] = session_date
-            self._dates_path(container_tag).write_text(
-                json.dumps(dates), encoding="utf-8"
-            )
+            marker = self._dates_path(container_tag)
+            partial = marker.with_suffix(".tmp")
+            partial.write_text(json.dumps(dates), encoding="utf-8")
+            os.replace(partial, marker)
 
         ingested[session_id] = store_ids
         marker = self._ingested_path(container_tag)
