@@ -202,7 +202,13 @@ export class Orchestrator {
       identities.questionSetSha256 = questionSetSha256(
         checkpoint.targetQuestionIds ?? allQuestions.map((q) => q.questionId)
       )
-      assertResumeIdentities(checkpoint, identities)
+      assertResumeIdentities(checkpoint, identities, phases.includes("evaluate"))
+      // Judge-overridden copies clear these fields. Stamp them when scoring
+      // first resumes, while leaving legacy checkpoints without identities alone.
+      if (phases.includes("evaluate") && checkpoint.datasetSha256 !== undefined) {
+        checkpoint.scoringPath ??= identities.scoringPath
+        checkpoint.promptVersion ??= identities.promptVersion
+      }
 
       effectiveLimit = checkpoint.limit
       targetQuestionIds = checkpoint.targetQuestionIds

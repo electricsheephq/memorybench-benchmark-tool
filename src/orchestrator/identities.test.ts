@@ -259,7 +259,7 @@ test("orchestrator records fresh identities, rejects drift before provider init,
       getJudgeConfig: () => ({apiKey:""}) }));
     const { Orchestrator } = await import(source + "/src/orchestrator/index.ts");
     const options = { provider: "filesystem", benchmark: "locomo", judgeModel: "gpt-4o",
-      answeringModel: "gpt-4o", runId: "synthetic", phases: ["report"] };
+      answeringModel: "gpt-4o", runId: "synthetic", phases: ["evaluate", "report"] };
     const path = "./data/runs/synthetic/checkpoint.json";
     const runner = new Orchestrator();
     await runner.run(options);

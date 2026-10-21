@@ -52,8 +52,36 @@ export function runIdentities(
       providerPrompts: provider.prompts,
     }),
   ])
+  // Fixed, renderable input for every registered provider; renderer errors must
+  // propagate rather than silently substituting a different prompt identity.
+  const context = {
+    content: "CONTEXT",
+    score: 1,
+    vectorScore: 1,
+    bm25Score: 1,
+    sessionId: "SESSION",
+    chunkIndex: 0,
+    date: "2000-01-01",
+    memory: "MEMORY",
+    fact: "FACT",
+    valid_at: "2000-01-01",
+    metadata: {
+      date: "2000-01-01",
+      timestamp: "2000-01-01",
+      event_date: "2000-01-01",
+      session_date: "2000-01-01",
+      speaker: "SPEAKER",
+      source_session_id: "SESSION",
+      temporalContext: { documentDate: "2000-01-01", eventDate: "2000-01-01" },
+    },
+    chunks: [{ content: "CHUNK", position: 0 }],
+    chunk: "CHUNK",
+    subject: "SUBJECT",
+    predicate: "PREDICATE",
+    object: "OBJECT",
+  }
   const readerPrompts = [undefined, "2000-01-01"].map((date) =>
-    buildAnswerPrompt("QUESTION", [{ content: "CONTEXT" }], date, provider)
+    buildAnswerPrompt("QUESTION", [context], date, provider)
   )
   return {
     datasetPath: benchmark.datasetPath,
@@ -74,7 +102,11 @@ export function questionSetSha256(orderedIds: string[]): string {
   return hashJson(orderedIds)
 }
 
-export function assertResumeIdentities(checkpoint: RunCheckpoint, current: RunIdentities): void {
+export function assertResumeIdentities(
+  checkpoint: RunCheckpoint,
+  current: RunIdentities,
+  scores = true
+): void {
   for (const key of [
     "datasetSha256",
     "questionSetSha256",
@@ -82,6 +114,7 @@ export function assertResumeIdentities(checkpoint: RunCheckpoint, current: RunId
     "readerPromptVersion",
     "scoringPath",
   ] as const) {
+    if (!scores && (key === "promptVersion" || key === "scoringPath")) continue
     if (checkpoint[key] !== undefined && checkpoint[key] !== current[key]) {
       throw new Error(`Resume refused: identity mismatch: ${key}`)
     }
