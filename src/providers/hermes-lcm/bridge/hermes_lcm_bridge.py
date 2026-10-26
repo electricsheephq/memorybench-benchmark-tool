@@ -1084,6 +1084,25 @@ class Bridge:
 
         db_path = self._db_path(container_tag)
         config = self._config(db_path)
+        if self.embeddings_enabled and self.provider_name == "fastembed":
+            from hermes_lcm import embedding_maintenance as maintenance
+
+            # Older product trees have no local readiness gate.
+            note_present = getattr(maintenance, "note_local_model_present", None)
+            if note_present is not None:
+                # D4 searches each per-question store once, after all session ingests.
+                note_present(config)  # initialize() has already warmed the model.
+                started = time.monotonic()
+                outcome = maintenance.run_incremental_embedding_pass(db_path, config)
+                complete = isinstance(outcome, str) and re.fullmatch(
+                    r"summaries=complete:\d+ chunks=complete:\d+", outcome
+                ) is not None
+                _log(
+                    f"LOCAL maintenance complete={complete} outcome={outcome!r} "
+                    f"wall_s={time.monotonic() - started:.6f}"
+                )
+                if not complete:
+                    raise RuntimeError("LOCAL product maintenance did not complete")
         store = MessageStore(str(db_path), ingest_protection_config=config)
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)  # noqa: F841 (keeps db warm)
