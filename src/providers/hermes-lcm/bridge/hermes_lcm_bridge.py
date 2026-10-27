@@ -648,6 +648,11 @@ class Bridge:
                 "HERMES_MB_EMBEDDINGS=off requires empty HERMES_MB_FUSION; "
                 "quota fusion needs chunk vectors"
             )
+        if self.recall_arm_weights is not None and os.environ.get("HERMES_MB_FUSION"):
+            raise RuntimeError(
+                "HERMES_MB_RECALL_ARM_WEIGHTS requires empty HERMES_MB_FUSION; "
+                "quota fusion does not use lcm_recall arm weights"
+            )
         # Warm the embedder once so the model download/load happens here, not
         # inside a per-question path, and .dim is populated.
         self._ensure_embedder()
@@ -708,15 +713,19 @@ class Bridge:
 
     def _ingest_provenance(self, container_tag: str | None) -> dict[str, Any]:
         if container_tag is None:
-            return {"harness_settings": self._harness_settings(), "unparsed_session_dates": 0}
-        marker = self._load_harness(container_tag)
-        provenance = {
-            "harness_settings": marker["harness_settings"],
-            "unparsed_session_dates": marker["unparsed_session_dates"],
-        }
-        current = self._harness_settings()
-        if current != marker["harness_settings"]:
-            provenance["process_harness_settings"] = current
+            provenance = {"harness_settings": self._harness_settings(), "unparsed_session_dates": 0}
+        else:
+            marker = self._load_harness(container_tag)
+            provenance = {
+                "harness_settings": marker["harness_settings"],
+                "unparsed_session_dates": marker["unparsed_session_dates"],
+            }
+            current = self._harness_settings()
+            if current != marker["harness_settings"]:
+                provenance["process_harness_settings"] = current
+        # Present only when the flag is set, so default-run provenance is unchanged.
+        if self.recall_arm_weights is not None:
+            provenance["recall_arm_weights"] = dict(self.recall_arm_weights)
         return provenance
 
     def _enforce_ingest_modes(self, container_tag: str) -> dict[str, Any]:

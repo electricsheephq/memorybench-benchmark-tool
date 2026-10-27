@@ -221,6 +221,7 @@ def fixture_bridge(monkeypatch: pytest.MonkeyPatch) -> bridge.Bridge:
     instance.provider_name = "fastembed"
     instance.workdir = Path("/fixture-workdir")
     instance.answer_ready_content_chars = 2400
+    instance.recall_arm_weights = None
     instance._db_path = lambda _tag: Path("/fixture-workdir/container.db")
     instance._config = lambda _path: object()
     instance._load_dates = lambda _tag: {"session-1": "2023-05-30"}

@@ -22,6 +22,8 @@ export HERMES_MB_ANSWER_PRESENTATION="evidence_cards_v1"
 export HERMES_MB_ANSWER_READY_CONTENT_CHARS="2400"
 export HERMES_MB_FUSION="quota:fts=1,chunk=2"
 export LCM_CHUNK_MIN_CONVERSATIONAL_TOKENS="10"
+# Recall arm weights are not part of this recipe's pins; never inherit them from the shell.
+unset HERMES_MB_RECALL_ARM_WEIGHTS
 
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly run_stamp

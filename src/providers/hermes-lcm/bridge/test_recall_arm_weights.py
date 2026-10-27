@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -16,6 +17,10 @@ SPEC.loader.exec_module(bridge)
 sys.stdout = _saved_stdout
 
 ENV = "HERMES_MB_RECALL_ARM_WEIGHTS"
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout"
+)
 
 
 @pytest.fixture
@@ -138,3 +143,31 @@ def test_flag_is_read_once_and_logged_at_initialize(make_bridge, monkeypatch, ca
     log = capsys.readouterr().err
     assert log.count("recall_arm_weights=") == 1
     assert 'recall_arm_weights={"fts": 1.0, "summary": 1.0, "chunk": 1.0}' in log
+
+
+@pytest.mark.parametrize("raw", [None, ""])
+def test_default_provenance_has_no_weights_field(make_bridge, raw):
+    instance = make_bridge(raw)
+    assert "recall_arm_weights" not in instance._ingest_provenance(None)
+    assert "recall_arm_weights" not in instance._ingest_provenance("default")
+    assert "recall_arm_weights" not in instance.initialize({"containerTag": "default"})
+
+
+def test_weights_are_recorded_in_every_provenance_report(make_bridge):
+    instance = make_bridge("chunk=1,fts=1,summary=1")
+    expected = {"fts": 1.0, "summary": 1.0, "chunk": 1.0}
+    assert instance._ingest_provenance(None)["recall_arm_weights"] == expected
+    assert instance._ingest_provenance("weighted")["recall_arm_weights"] == expected
+    assert instance.initialize({"containerTag": "weighted"})["recall_arm_weights"] == expected
+    # The reported copy cannot alias the bridge's own weights.
+    instance._ingest_provenance(None)["recall_arm_weights"]["fts"] = 9.0
+    assert instance.recall_arm_weights == expected
+
+
+def test_weights_with_quota_fusion_refuse_initialize(make_bridge, monkeypatch):
+    instance = make_bridge("fts=1,summary=1,chunk=1")
+    monkeypatch.setenv("HERMES_MB_EMBEDDINGS", "on")
+    instance.embeddings_enabled = True
+    monkeypatch.setenv("HERMES_MB_FUSION", "quota:fts=1,chunk=2")
+    with pytest.raises(RuntimeError, match="HERMES_MB_RECALL_ARM_WEIGHTS requires empty HERMES_MB_FUSION"):
+        instance.initialize({})

@@ -357,6 +357,13 @@ export class HermesLcmProvider implements Provider {
         unparsed_session_dates:
           (response.provenance as { unparsed_session_dates?: unknown } | undefined)
             ?.unparsed_session_dates ?? 0,
+        ...((response.provenance as { recall_arm_weights?: unknown } | undefined)
+          ?.recall_arm_weights !== undefined
+          ? {
+              recall_arm_weights: (response.provenance as { recall_arm_weights: unknown })
+                .recall_arm_weights,
+            }
+          : {}),
         result_count: results.length,
       }) + "\n"
     )

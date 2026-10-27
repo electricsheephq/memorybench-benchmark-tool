@@ -63,6 +63,22 @@ describe("Hermes-LCM durable recall provenance", () => {
     expect(text).not.toContain("PROVENANCE_CONTENT_MUST_NOT_BE_RECORDED")
   })
 
+  test("records recall arm weights only when the bridge reports them", async () => {
+    const recall_arm_weights = { fts: 1, summary: 1, chunk: 1 }
+    const { provider, path } = fixture({
+      ok: true,
+      results: [],
+      provenance: { recall_arm_weights },
+    })
+    await provider.search("query", { containerTag })
+    const row = JSON.parse(readFileSync(path, "utf8").trimEnd())
+    expect(row.recall_arm_weights).toEqual(recall_arm_weights)
+    expect(Object.keys(row)).toEqual([
+      "ts", "containerTag", "degraded", "degraded_reason", "coverage", "harness_settings",
+      "unparsed_session_dates", "recall_arm_weights", "result_count",
+    ])
+  })
+
   test("defaults missing provenance and degraded fields and appends each search", async () => {
     const { provider, path } = fixture({ ok: true, results: [] })
     for (let i = 0; i < 2; i++) await provider.search("query", { containerTag })
