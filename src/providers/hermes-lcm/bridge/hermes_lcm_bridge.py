@@ -36,6 +36,7 @@ Environment:
     HERMES_MB_EVENT_TIME          off (default) | session (declared event time)
     HERMES_MB_SENDER_RENDER       off (default) | gateway ([speaker] content)
     HERMES_MB_MODEL              embedding model id (default per provider)
+    HERMES_MB_RECALL_ARM_WEIGHTS fts=<float>,summary=<float>,chunk=<float> (optional)
     HERMES_MB_ANSWER_READY_CONTENT_CHARS
                                   per-result exact-read cap (default 2400)
     LCM_LONGMEMEVAL_FASTEMBED_CACHE  fastembed model cache dir
@@ -51,6 +52,7 @@ import re
 import sys
 import time
 import traceback
+import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +74,37 @@ sys.stdout = sys.stderr
 
 def _log(message: str) -> None:
     print(f"[hermes-lcm-bridge] {message}", file=sys.stderr, flush=True)
+
+
+def _parse_recall_arm_weights(raw: str) -> dict[str, float] | None:
+    if not raw:
+        return None
+    error = (
+        "HERMES_MB_RECALL_ARM_WEIGHTS must contain exactly "
+        "fts=<float>,summary=<float>,chunk=<float> with finite weights >= 0"
+    )
+    number = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+    pairs = raw.split(",")
+    if len(pairs) != 3 or any(
+        re.fullmatch(rf"(?:fts|summary|chunk)={number}", pair) is None
+        for pair in pairs
+    ):
+        raise RuntimeError(error)
+    requested = {name: float(value) for name, value in (pair.split("=") for pair in pairs)}
+    if set(requested) != {"fts", "summary", "chunk"} or any(
+        not math.isfinite(value) or value < 0 for value in requested.values()
+    ):
+        raise RuntimeError(error)
+
+    from hermes_lcm.config import _parse_arm_weights, _DEFAULT_RECALL_ARM_WEIGHTS
+
+    parser_warnings: list[str] = []
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        parsed = _parse_arm_weights(raw, _DEFAULT_RECALL_ARM_WEIGHTS, warnings=parser_warnings)
+    if parser_warnings or emitted or parsed != requested:
+        raise RuntimeError(error)
+    return parsed
 
 
 def _safe(value: str) -> str:
@@ -565,6 +598,7 @@ class Bridge:
         if embeddings not in {"on", "off"}:
             raise RuntimeError("HERMES_MB_EMBEDDINGS must be on or off")
         self.embeddings_enabled = embeddings == "on"
+        recall_arm_weights = os.environ.get("HERMES_MB_RECALL_ARM_WEIGHTS", "")
         self.event_time_mode = _mode_env("HERMES_MB_EVENT_TIME", "session")
         self.sender_render_mode = _mode_env("HERMES_MB_SENDER_RENDER", "gateway")
         self._initialized = False
@@ -596,6 +630,7 @@ class Bridge:
         )
 
         _ensure_hermes_lcm_package()
+        self.recall_arm_weights = _parse_recall_arm_weights(recall_arm_weights)
         self._deterministic_session_summary = deterministic_session_summary
         self._resolve_harness_provider = resolve_harness_provider
 
@@ -621,6 +656,8 @@ class Bridge:
             f"initialized provider={self.provider_name} model={self.model} dim={self.dim} "
             f"workdir={self.workdir}"
         )
+        if self.recall_arm_weights is not None:
+            _log(f"recall_arm_weights={json.dumps(self.recall_arm_weights)}")
         return {
             "ok": True,
             "provider": self.provider_name,
@@ -754,12 +791,15 @@ class Bridge:
     def _config(self, db_path: Path):
         from hermes_lcm.config import LCMConfig
 
-        return LCMConfig(
+        config = LCMConfig(
             database_path=str(db_path),
             embeddings_enabled=self.embeddings_enabled,
             embedding_provider=self.provider_name,
             embedding_model=self.model,
         )
+        if self.recall_arm_weights is not None:
+            config.recall_arm_weights = dict(self.recall_arm_weights)
+        return config
 
     # -- ingest ---------------------------------------------------------------
 
