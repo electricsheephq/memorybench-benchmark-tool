@@ -1133,12 +1133,14 @@ class Bridge:
 
         db_path = self._db_path(container_tag)
         config = self._config(db_path)
+        local_gate = False
         if self.embeddings_enabled and self.provider_name == "fastembed":
             from hermes_lcm import embedding_maintenance as maintenance
 
             # Older product trees have no local readiness gate.
             note_present = getattr(maintenance, "note_local_model_present", None)
             if note_present is not None:
+                local_gate = True
                 # D4 searches each per-question store once, after all session ingests.
                 note_present(config)  # initialize() has already warmed the model.
                 started = time.monotonic()
@@ -1183,6 +1185,18 @@ class Bridge:
             )
             if "error" in payload:
                 raise RuntimeError(f"lcm_recall error: {payload['error']}")
+            if local_gate and not payload.get("timeout"):
+                # The maintenance status covers only the batch it ran; recall decides from the
+                # catch-up receipt. A row that fell back to full text must not pass as LOCAL.
+                # Timeouts keep propagating: the health step re-runs them.
+                coverage = (payload.get("provenance") or {}).get("coverage") or {}
+                short = {
+                    arm: coverage.get(arm)
+                    for arm in ("summary", "chunk")
+                    if coverage.get(arm) not in ("full", "full_approx")
+                }
+                if short:
+                    raise RuntimeError(f"LOCAL recall without full semantic coverage: {short}")
 
             results: list[dict[str, Any]] = []
             bridge_hydrated_count = 0
