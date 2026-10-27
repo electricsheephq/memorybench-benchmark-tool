@@ -36,6 +36,7 @@ Environment:
     HERMES_MB_EVENT_TIME          off (default) | session (declared event time)
     HERMES_MB_SENDER_RENDER       off (default) | gateway ([speaker] content)
     HERMES_MB_MODEL              embedding model id (default per provider)
+    HERMES_MB_RECALL_ARM_WEIGHTS fts=<float>,summary=<float>,chunk=<float> (optional)
     HERMES_MB_ANSWER_READY_CONTENT_CHARS
                                   per-result exact-read cap (default 2400)
     LCM_LONGMEMEVAL_FASTEMBED_CACHE  fastembed model cache dir
@@ -51,6 +52,7 @@ import re
 import sys
 import time
 import traceback
+import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +74,37 @@ sys.stdout = sys.stderr
 
 def _log(message: str) -> None:
     print(f"[hermes-lcm-bridge] {message}", file=sys.stderr, flush=True)
+
+
+def _parse_recall_arm_weights(raw: str) -> dict[str, float] | None:
+    if not raw:
+        return None
+    error = (
+        "HERMES_MB_RECALL_ARM_WEIGHTS must contain exactly "
+        "fts=<float>,summary=<float>,chunk=<float> with finite weights >= 0"
+    )
+    number = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+    pairs = raw.split(",")
+    if len(pairs) != 3 or any(
+        re.fullmatch(rf"(?:fts|summary|chunk)={number}", pair) is None
+        for pair in pairs
+    ):
+        raise RuntimeError(error)
+    requested = {name: float(value) for name, value in (pair.split("=") for pair in pairs)}
+    if set(requested) != {"fts", "summary", "chunk"} or any(
+        not math.isfinite(value) or value < 0 for value in requested.values()
+    ):
+        raise RuntimeError(error)
+
+    from hermes_lcm.config import _parse_arm_weights, _DEFAULT_RECALL_ARM_WEIGHTS
+
+    parser_warnings: list[str] = []
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        parsed = _parse_arm_weights(raw, _DEFAULT_RECALL_ARM_WEIGHTS, warnings=parser_warnings)
+    if parser_warnings or emitted or parsed != requested:
+        raise RuntimeError(error)
+    return parsed
 
 
 def _safe(value: str) -> str:
@@ -565,6 +598,7 @@ class Bridge:
         if embeddings not in {"on", "off"}:
             raise RuntimeError("HERMES_MB_EMBEDDINGS must be on or off")
         self.embeddings_enabled = embeddings == "on"
+        recall_arm_weights = os.environ.get("HERMES_MB_RECALL_ARM_WEIGHTS", "")
         self.event_time_mode = _mode_env("HERMES_MB_EVENT_TIME", "session")
         self.sender_render_mode = _mode_env("HERMES_MB_SENDER_RENDER", "gateway")
         self._initialized = False
@@ -596,6 +630,7 @@ class Bridge:
         )
 
         _ensure_hermes_lcm_package()
+        self.recall_arm_weights = _parse_recall_arm_weights(recall_arm_weights)
         self._deterministic_session_summary = deterministic_session_summary
         self._resolve_harness_provider = resolve_harness_provider
 
@@ -613,6 +648,11 @@ class Bridge:
                 "HERMES_MB_EMBEDDINGS=off requires empty HERMES_MB_FUSION; "
                 "quota fusion needs chunk vectors"
             )
+        if self.recall_arm_weights is not None and os.environ.get("HERMES_MB_FUSION"):
+            raise RuntimeError(
+                "HERMES_MB_RECALL_ARM_WEIGHTS requires empty HERMES_MB_FUSION; "
+                "quota fusion does not use lcm_recall arm weights"
+            )
         # Warm the embedder once so the model download/load happens here, not
         # inside a per-question path, and .dim is populated.
         self._ensure_embedder()
@@ -621,6 +661,8 @@ class Bridge:
             f"initialized provider={self.provider_name} model={self.model} dim={self.dim} "
             f"workdir={self.workdir}"
         )
+        if self.recall_arm_weights is not None:
+            _log(f"recall_arm_weights={json.dumps(self.recall_arm_weights)}")
         return {
             "ok": True,
             "provider": self.provider_name,
@@ -671,15 +713,19 @@ class Bridge:
 
     def _ingest_provenance(self, container_tag: str | None) -> dict[str, Any]:
         if container_tag is None:
-            return {"harness_settings": self._harness_settings(), "unparsed_session_dates": 0}
-        marker = self._load_harness(container_tag)
-        provenance = {
-            "harness_settings": marker["harness_settings"],
-            "unparsed_session_dates": marker["unparsed_session_dates"],
-        }
-        current = self._harness_settings()
-        if current != marker["harness_settings"]:
-            provenance["process_harness_settings"] = current
+            provenance = {"harness_settings": self._harness_settings(), "unparsed_session_dates": 0}
+        else:
+            marker = self._load_harness(container_tag)
+            provenance = {
+                "harness_settings": marker["harness_settings"],
+                "unparsed_session_dates": marker["unparsed_session_dates"],
+            }
+            current = self._harness_settings()
+            if current != marker["harness_settings"]:
+                provenance["process_harness_settings"] = current
+        # Present only when the flag is set, so default-run provenance is unchanged.
+        if self.recall_arm_weights is not None:
+            provenance["recall_arm_weights"] = dict(self.recall_arm_weights)
         return provenance
 
     def _enforce_ingest_modes(self, container_tag: str) -> dict[str, Any]:
@@ -754,12 +800,15 @@ class Bridge:
     def _config(self, db_path: Path):
         from hermes_lcm.config import LCMConfig
 
-        return LCMConfig(
+        config = LCMConfig(
             database_path=str(db_path),
             embeddings_enabled=self.embeddings_enabled,
             embedding_provider=self.provider_name,
             embedding_model=self.model,
         )
+        if self.recall_arm_weights is not None:
+            config.recall_arm_weights = dict(self.recall_arm_weights)
+        return config
 
     # -- ingest ---------------------------------------------------------------
 
@@ -1084,6 +1133,27 @@ class Bridge:
 
         db_path = self._db_path(container_tag)
         config = self._config(db_path)
+        local_gate = False
+        if self.embeddings_enabled and self.provider_name == "fastembed":
+            from hermes_lcm import embedding_maintenance as maintenance
+
+            # Older product trees have no local readiness gate.
+            note_present = getattr(maintenance, "note_local_model_present", None)
+            if note_present is not None:
+                local_gate = True
+                # D4 searches each per-question store once, after all session ingests.
+                note_present(config)  # initialize() has already warmed the model.
+                started = time.monotonic()
+                outcome = maintenance.run_incremental_embedding_pass(db_path, config)
+                complete = isinstance(outcome, str) and re.fullmatch(
+                    r"summaries=complete:\d+ chunks=complete:\d+", outcome
+                ) is not None
+                _log(
+                    f"LOCAL maintenance complete={complete} outcome={outcome!r} "
+                    f"wall_s={time.monotonic() - started:.6f}"
+                )
+                if not complete:
+                    raise RuntimeError("LOCAL product maintenance did not complete")
         store = MessageStore(str(db_path), ingest_protection_config=config)
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)  # noqa: F841 (keeps db warm)
@@ -1115,6 +1185,18 @@ class Bridge:
             )
             if "error" in payload:
                 raise RuntimeError(f"lcm_recall error: {payload['error']}")
+            if local_gate and not payload.get("timeout"):
+                # The maintenance status covers only the batch it ran; recall decides from the
+                # catch-up receipt. A row that fell back to full text must not pass as LOCAL.
+                # Timeouts keep propagating: the health step re-runs them.
+                coverage = (payload.get("provenance") or {}).get("coverage") or {}
+                short = {
+                    arm: coverage.get(arm)
+                    for arm in ("summary", "chunk")
+                    if coverage.get(arm) not in ("full", "full_approx")
+                }
+                if short:
+                    raise RuntimeError(f"LOCAL recall without full semantic coverage: {short}")
 
             results: list[dict[str, Any]] = []
             bridge_hydrated_count = 0
