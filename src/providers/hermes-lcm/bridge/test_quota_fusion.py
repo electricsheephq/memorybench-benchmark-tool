@@ -197,11 +197,18 @@ def install_fake_hermes_modules(monkeypatch: pytest.MonkeyPatch, tools: types.Mo
     store.MessageStore = _FakeStore
     vector_store = types.ModuleType("hermes_lcm.vector_store")
     vector_store.VectorStore = _FakeVectorStore
+    maintenance = types.ModuleType("hermes_lcm.embedding_maintenance")
+    maintenance.note_local_model_present = lambda _config: None
+    maintenance.run_incremental_embedding_pass = (
+        lambda _path, _config: "summaries=complete:0 chunks=complete:0"
+    )
+    package.embedding_maintenance = maintenance
     monkeypatch.setitem(sys.modules, "hermes_lcm", package)
     monkeypatch.setitem(sys.modules, "hermes_lcm.dag", dag)
     monkeypatch.setitem(sys.modules, "hermes_lcm.store", store)
     monkeypatch.setitem(sys.modules, "hermes_lcm.vector_store", vector_store)
     monkeypatch.setitem(sys.modules, "hermes_lcm.tools", tools)
+    monkeypatch.setitem(sys.modules, "hermes_lcm.embedding_maintenance", maintenance)
 
 
 def fixture_bridge(monkeypatch: pytest.MonkeyPatch) -> bridge.Bridge:
@@ -303,6 +310,68 @@ def test_search_propagates_true_product_timeout(monkeypatch: pytest.MonkeyPatch)
     assert response["timeout"] is True
     assert response["degraded"] is True
     assert response["degraded_reason"] == "query timed out"
+
+
+def test_local_maintenance_complete_proceeds_to_recall(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    tools = types.ModuleType("hermes_lcm.tools")
+    tools.lcm_recall = lambda *_args, **_kwargs: calls.append("recall") or '{"hits": []}'
+    install_fake_hermes_modules(monkeypatch, tools)
+    maintenance = sys.modules["hermes_lcm.embedding_maintenance"]
+    maintenance.note_local_model_present = lambda config: calls.append(("present", config))
+    maintenance.run_incremental_embedding_pass = (
+        lambda path, config: calls.append(("pass", path, config))
+        or "summaries=complete:2 chunks=complete:3"
+    )
+    monkeypatch.delenv("HERMES_MB_FUSION", raising=False)
+    instance = fixture_bridge(monkeypatch)
+    config = object()
+    instance._config = lambda _path: config
+
+    instance.search({"containerTag": "fixture", "query": "ordinary"})
+
+    assert calls == [
+        ("present", config),
+        ("pass", instance._db_path("fixture"), config),
+        "recall",
+    ]
+
+
+@pytest.mark.parametrize("outcome", ["error", "summaries=complete:0 chunks=pending:1", "", None])
+def test_local_maintenance_incomplete_refuses_recall(monkeypatch: pytest.MonkeyPatch, outcome) -> None:
+    tools = types.ModuleType("hermes_lcm.tools")
+
+    def unexpected_recall(*_args, **_kwargs):
+        raise AssertionError("incomplete maintenance must stop before recall")
+
+    tools.lcm_recall = unexpected_recall
+    install_fake_hermes_modules(monkeypatch, tools)
+    sys.modules["hermes_lcm.embedding_maintenance"].run_incremental_embedding_pass = (
+        lambda _path, _config: outcome
+    )
+    monkeypatch.delenv("HERMES_MB_FUSION", raising=False)
+
+    with pytest.raises(RuntimeError, match="LOCAL product maintenance did not complete"):
+        fixture_bridge(monkeypatch).search({"containerTag": "fixture", "query": "ordinary"})
+
+
+def test_local_maintenance_older_tree_skips_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    tools = types.ModuleType("hermes_lcm.tools")
+    tools.lcm_recall = lambda *_args, **_kwargs: calls.append("recall") or '{"hits": []}'
+    install_fake_hermes_modules(monkeypatch, tools)
+    maintenance = sys.modules["hermes_lcm.embedding_maintenance"]
+    del maintenance.note_local_model_present
+
+    def unexpected_pass(*_args, **_kwargs):
+        raise AssertionError("older trees must skip maintenance")
+
+    maintenance.run_incremental_embedding_pass = unexpected_pass
+    monkeypatch.delenv("HERMES_MB_FUSION", raising=False)
+
+    fixture_bridge(monkeypatch).search({"containerTag": "fixture", "query": "ordinary"})
+
+    assert calls == ["recall"]
 
 
 def test_search_quota_routes_canned_arms_and_emits_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
