@@ -41,8 +41,9 @@ export function normalizeHermesSearchResponse(response: BridgeResponse): unknown
 }
 
 /** One long-lived JSONL bridge process dedicated to one database container. */
-class BridgeHandle {
+export class BridgeHandle {
   private stdoutBuffer = ""
+  private stderrBuffer = ""
   private pending: {
     resolve: (response: BridgeResponse) => void
     reject: (error: Error) => void
@@ -66,10 +67,11 @@ class BridgeHandle {
     this.proc.stdout.setEncoding("utf8")
     this.proc.stderr.setEncoding("utf8")
     this.proc.stdout.on("data", (chunk: string) => this.onStdout(chunk))
-    this.proc.stderr.on("data", (chunk: string) => {
-      for (const line of chunk.split("\n")) {
-        if (line.trim()) logger.debug(`[hermes-lcm:${this.tag}] ${line}`)
-      }
+    this.proc.stderr.on("data", (chunk: string) => this.onStderr(chunk))
+    this.proc.stderr.once("end", () => {
+      const tail = this.stderrBuffer
+      this.stderrBuffer = ""
+      this.logStderr(tail)
     })
     this.proc.on("exit", (code, signal) => {
       if (this.closed) return
@@ -80,6 +82,24 @@ class BridgeHandle {
     this.proc.on("error", (error) => {
       this.markDead(new Error(`hermes-lcm bridge (${this.tag}) process error: ${error.message}`))
     })
+  }
+
+  private onStderr(chunk: string): void {
+    this.stderrBuffer += chunk
+    let newlineIndex: number
+    while ((newlineIndex = this.stderrBuffer.indexOf("\n")) !== -1) {
+      const line = this.stderrBuffer.slice(0, newlineIndex)
+      this.stderrBuffer = this.stderrBuffer.slice(newlineIndex + 1)
+      this.logStderr(line)
+    }
+  }
+
+  private logStderr(line: string): void {
+    if (!line.trim()) return
+    const message = `[hermes-lcm:${this.tag}] ${line}`
+    // The release kit counts LOCAL maintenance passes from run.log, which drops debug lines.
+    if (line.includes("LOCAL maintenance complete=")) logger.info(message)
+    else logger.debug(message)
   }
 
   private onStdout(chunk: string): void {
