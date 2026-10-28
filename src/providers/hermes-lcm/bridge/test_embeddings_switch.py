@@ -254,6 +254,7 @@ def test_summary_node_carries_the_sessions_time_bounds(make_bridge):
 def test_resume_skips_a_session_already_ingested(make_bridge, tmp_path):
     instance = make_bridge("off")
     instance.initialize({})
+    instance.sender_render_mode = "off"  # the record predates ingest-mode records
     instance._ingested_path("resume").write_text(json.dumps({"s1": [4, 5, 6]}), encoding="utf-8")
     reply = instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
     assert reply == {"ok": True, "documentIds": ["4", "5", "6"], "resumed": True, "unparsed_session_dates_total": 0}
@@ -263,9 +264,21 @@ def test_resume_skips_a_session_already_ingested(make_bridge, tmp_path):
 def test_unreadable_completion_record_stops_the_run(make_bridge):
     instance = make_bridge("off")
     instance.initialize({})
+    instance.sender_render_mode = "off"  # the record predates ingest-mode records
     instance._ingested_path("resume").write_text("{not json", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         instance.ingest({"containerTag": "resume", "session": {"sessionId": "s1", "messages": []}})
+
+
+def test_resume_refuses_a_container_ingested_without_speaker_names(make_bridge):
+    # A container written before ingest modes were recorded holds content as
+    # given; resuming it under the default prefix mode would mix both forms.
+    instance = make_bridge("off")
+    instance.initialize({})
+    instance._ingested_path("old").write_text('{"s1": [1]}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="ingest modes differ"):
+        instance.ingest({"containerTag": "old", "session": {"sessionId": "s1", "messages": []}})
+    assert not instance._db_path("old").exists()
 
 
 @pytest.mark.skipif(not os.environ.get("HERMES_LCM_REPO"), reason="requires sandboxed product checkout")
